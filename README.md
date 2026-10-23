@@ -9,7 +9,7 @@ SillyTavern（酒馆）的第三方扩展，把 AI 回复读出来。两种模�
 
 ## 安装
 
-1. 酒馆 → 扩展 → 安装扩展，填这个仓库的地址；或者把整个文件夹放到 `public/scripts/extensions/third-party/st-voice`。
+1. 酒馆 → 扩展 → 安装扩展，填 `https://github.com/ShirahaTobisa/st-voice`；或者把整个文件夹放到 `public/scripts/extensions/third-party/st-voice`。
 2. 刷新页面，扩展面板里会多出「酒馆语音」。
 
 ## 用法
