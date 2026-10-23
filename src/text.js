@@ -93,20 +93,36 @@ export function extractLines(root, maxLength = 160) {
     return result;
 }
 
-// 高亮用 CSS 自定义高亮，不改正文；句子在 iframe 里时要在那个窗口里登记，样式也补进去
-let highlightWindow = null;
-export function highlight(range) {
+// 高亮用 CSS 自定义高亮，不改正文。两种：正在念的句子（底色）、能点的句子（虚线）。句子在 iframe 里时要在那个窗口登记并补样式
+const MARKS = 'st-voice-marks';
+const STYLE = `::highlight(${HIGHLIGHT}) { background-color: rgba(255, 200, 0, 0.35); } ::highlight(${MARKS}) { text-decoration: underline dashed rgba(255, 200, 0, 0.75); text-underline-offset: 3px; }`;
+const windows = new Set();
+const windowOf = (range) => {
     const doc = range.startContainer.ownerDocument;
     const win = doc.defaultView;
-    if (!win?.CSS?.highlights) return;
-    clearHighlight();
-    if (doc !== document && !doc.getElementById('st-voice-highlight')) {
-        doc.head.append(Object.assign(doc.createElement('style'), { id: 'st-voice-highlight', textContent: `::highlight(${HIGHLIGHT}) { background-color: rgba(255, 200, 0, 0.35); }` }));
+    if (!win?.CSS?.highlights) return null;
+    if (doc !== document && !doc.getElementById('st-voice-highlight')) doc.head.append(Object.assign(doc.createElement('style'), { id: 'st-voice-highlight', textContent: STYLE }));
+    windows.add(win);
+    return win;
+};
+const clearAll = (name) => {
+    for (const win of windows) {
+        try { win.CSS.highlights.delete(name); } catch { windows.delete(win); /* iframe 已经没了 */ }
     }
-    win.CSS.highlights.set(HIGHLIGHT, new win.Highlight(range));
-    highlightWindow = win;
+};
+export function highlight(range) {
+    clearAll(HIGHLIGHT);
+    const win = windowOf(range);
+    if (win) win.CSS.highlights.set(HIGHLIGHT, new win.Highlight(range));
 }
-export function clearHighlight() {
-    try { highlightWindow?.CSS.highlights.delete(HIGHLIGHT); } catch { /* iframe 可能已经没了 */ }
-    highlightWindow = null;
+export const clearHighlight = () => clearAll(HIGHLIGHT);
+// 一次画一批能点的句子，按所在窗口分组
+export function setMarks(ranges) {
+    clearAll(MARKS);
+    const groups = new Map();
+    for (const range of ranges) {
+        const win = windowOf(range);
+        if (win) (groups.get(win) || groups.set(win, []).get(win)).push(range);
+    }
+    for (const [win, list] of groups) win.CSS.highlights.set(MARKS, new win.Highlight(...list));
 }

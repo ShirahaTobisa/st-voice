@@ -1,8 +1,9 @@
 // 设置窗：基本 / Fish Audio / 配音表 / 缓存
 import { el, icon, button, toggle, field, card, range, select, input, row, openWindow } from './ui.js';
-import { audioStats, clearAudio } from './cache.js';
+import { listAudio, deleteAudio, clearAudio } from './cache.js';
 import { NARRATOR, listModels } from './analyze.js';
 import { uploadFile, deleteFile } from './files.js';
+import { getLog, clearLog, exportLog, download } from './log.js';
 
 const context = () => SillyTavern.getContext();
 const sampleAudio = new Audio();
@@ -364,13 +365,59 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
             label: '缓存', icon: 'fa-database',
             render(content) {
                 const stats = el('div', 'sv-stat', '统计中…');
-                const paint = async () => {
-                    const { count, bytes } = await audioStats();
-                    stats.textContent = `已缓存 ${count} 段语音，共 ${(bytes / 1048576).toFixed(1)} MB`;
+                const search = input('', { placeholder: '按文字、人物、声音搜' });
+                const list = el('div', 'sv-list sv-list-tall');
+                const urls = new Map();
+                const blobUrl = (entry) => urls.get(entry.key) || urls.set(entry.key, URL.createObjectURL(entry.blob)).get(entry.key);
+                const fmt = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`);
+                let rows = [];
+                const paint = () => {
+                    const query = search.value.trim();
+                    const shown = rows.filter((entry) => !query || [entry.text, entry.speaker, entry.voice].some((value) => (value || '').includes(query)));
+                    stats.textContent = `已缓存 ${rows.length} 段语音，共 ${fmt(rows.reduce((sum, entry) => sum + entry.size, 0))}${query ? `，匹配 ${shown.length} 段` : ''}`;
+                    list.replaceChildren(...shown.slice(0, 100).map((entry) => row(entry.speaker || '读', (entry.text || '').slice(0, 40) || '（没记文字）',
+                        `${entry.speaker || '朗读'} · ${entry.voice || '默认声音'} · ${fmt(entry.size)} · ${new Date(entry.time).toLocaleString()}`,
+                        button('', () => playSample(blobUrl(entry)), { kind: 'sv-icon', iconName: 'fa-play', title: '试听' }),
+                        button('', () => download(entry.blob, `${entry.speaker || '朗读'}-${(entry.text || '').slice(0, 12)}.mp3`), { kind: 'sv-icon', iconName: 'fa-download', title: '下载 mp3' }),
+                        button('', async () => { await deleteAudio(entry.key); rows = rows.filter((item) => item !== entry); paint(); }, { kind: 'sv-icon', iconName: 'fa-trash', title: '删除' }))));
+                    if (!shown.length) list.append(el('div', 'sv-empty', rows.length ? '没有匹配的' : '还没有缓存'));
+                    else if (shown.length > 100) list.append(el('div', 'sv-empty', '只列前 100 条，搜一下缩小范围'));
+                };
+                search.addEventListener('input', paint);
+                listAudio().then((all) => { rows = all; paint(); });
+                content.append(card('语音缓存', '合成过的音频存在这个浏览器里，同一句重听不再花钱。能试听、下载成 mp3、删单条', stats, search, list,
+                    button('清空全部', async () => {
+                        if (!await confirmPopup('清空全部缓存？之后重听都要重新合成。')) return;
+                        await clearAudio();
+                        rows = [];
+                        paint();
+                    }, { iconName: 'fa-trash' })));
+            },
+        },
+        {
+            label: '日志', icon: 'fa-file-lines',
+            render(content) {
+                const list = el('div', 'sv-log');
+                const paint = () => {
+                    const entries = [...getLog()].reverse();
+                    list.replaceChildren(...entries.map((entry) => {
+                        const node = el('div', `sv-log-item${entry.kind === '错误' ? ' sv-log-error' : ''}`);
+                        node.append(el('span', 'sv-log-time', new Date(entry.time).toLocaleTimeString()), el('span', 'sv-log-kind', entry.kind), el('span', 'sv-log-msg', entry.message));
+                        if (entry.detail) {
+                            const detail = el('pre', 'sv-log-detail', entry.detail);
+                            detail.hidden = true;
+                            node.classList.add('sv-log-expandable');
+                            node.addEventListener('click', () => { detail.hidden = !detail.hidden; });
+                            node.append(detail);
+                        }
+                        return node;
+                    }));
+                    if (!entries.length) list.append(el('div', 'sv-empty', '还没有记录'));
                 };
                 paint();
-                content.append(card('语音缓存', '合成过的音频存在这个浏览器里，同一句重听不再花钱', stats,
-                    button('清空缓存', async () => { await clearAudio(); paint(); }, { iconName: 'fa-trash' })));
+                const actions = el('div', 'sv-search');
+                actions.append(button('刷新', paint, { iconName: 'fa-rotate' }), button('导出', exportLog, { iconName: 'fa-download' }), button('清空', () => { clearLog(); paint(); }, { iconName: 'fa-trash' }));
+                content.append(card('日志', '分析发了什么、模型回了什么、每句合成花了多久、哪里出错。有详情的点一下展开。只在这次打开页面期间保留', actions, list));
             },
         },
     ];

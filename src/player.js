@@ -1,9 +1,11 @@
 // 播放队列：边播边合成后面两段；合成过的音频进缓存
 import { getAudio, putAudio } from './cache.js';
 import { hash } from './text.js';
+import { log } from './log.js';
 
 const SILENT = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const brief = (item) => `${item.speaker ? `${item.speaker}：` : ''}${item.text.slice(0, 40)}`;
 
 export function createPlayer({ synthesize, onLine, onState }) {
     const audio = new Audio();
@@ -12,9 +14,14 @@ export function createPlayer({ synthesize, onLine, onState }) {
     const load = async (item, signal) => {
         const key = hash(`${item.key}|${item.voiceKey}|${item.tone}\n${item.text}`);
         const cached = await getAudio(key);
-        if (cached) return cached;
+        if (cached) {
+            log('合成', `缓存命中 ${brief(item)}`);
+            return cached;
+        }
+        const started = Date.now();
         const blob = await synthesize(item, signal);
-        putAudio(key, blob);
+        log('合成', brief(item), `${Date.now() - started} ms，${blob.size} 字节，声音：${item.voice?.title || '默认'}${item.tone ? `，语气：${item.tone}` : ''}`);
+        putAudio(key, blob, { text: item.text, speaker: item.speaker || '', voice: item.voice?.title || '', model: item.key });
         return blob;
     };
 
@@ -43,6 +50,7 @@ export function createPlayer({ synthesize, onLine, onState }) {
         const current = { abort: new AbortController(), rate, loads: [], cancel: null };
         session = current;
         const get = (i) => (current.loads[i] ??= load(items[i], current.abort.signal));
+        log('播放', `开始，${items.length} 句`);
         try {
             for (let i = 0; i < items.length && session === current; i += 1) {
                 const pending = get(i);
@@ -56,7 +64,10 @@ export function createPlayer({ synthesize, onLine, onState }) {
                 await wait(200);
             }
         } catch (error) {
-            if (session === current && error.name !== 'AbortError') onState('error', error.message);
+            if (session === current && error.name !== 'AbortError') {
+                log('错误', error.message);
+                onState('error', error.message);
+            }
         } finally {
             if (session === current) {
                 session = null;

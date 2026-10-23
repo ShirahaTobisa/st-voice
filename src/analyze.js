@@ -1,4 +1,6 @@
 // 角色配音：让模型判断每句是谁说的、什么语气
+import { log } from './log.js';
+
 export const NARRATOR = '旁白';
 export const KIND_LABEL = { quote: '对白', action: '动作', paren: '括号', text: '叙述', status: '状态' };
 
@@ -49,6 +51,7 @@ export function parseLabels(text, count) {
 export async function requestLabels(lines, info, llm) {
     const context = SillyTavern.getContext();
     const prompt = buildPrompt(lines, info);
+    log('分析', `发给模型 ${lines.length} 行（${llm.source === 'custom' ? llm.model : '酒馆当前连接'}）`, `[system]\n${SYSTEM}\n\n[user]\n${prompt}`);
     let text;
     let reasoning = '';
     if (llm.source === 'custom') {
@@ -67,8 +70,11 @@ export async function requestLabels(lines, info, llm) {
     } else {
         text = await context.generateRaw({ systemPrompt: SYSTEM, prompt });
     }
+    log('分析', text ? '模型回复' : '模型没有返回正文', text || (reasoning ? `[只有思考过程]\n${reasoning}` : ''));
     if (!text) throw new Error(reasoning ? '模型只返回了思考过程，没给出结果：换个不思考的模型，或者到接口那边把输出上限调大' : '模型没有返回内容');
-    return parseLabels(text, lines.length);
+    const labels = parseLabels(text, lines.length);
+    log('分析', `解析出 ${labels.filter(([speaker]) => speaker !== NARRATOR).length} 句台词，${new Set(labels.map(([speaker]) => speaker)).size} 个说话人`);
+    return labels;
 }
 
 // 拉模型列表：让酒馆后端去请求 {接口地址}/models
