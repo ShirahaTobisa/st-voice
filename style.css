@@ -128,12 +128,6 @@ body.st-voice-off .st_voice_play, body.st-voice-off .st_voice_preview { display:
 .sv-kind { flex-shrink: 0; padding: 2px 8px; border-radius: 999px; background: var(--sv-card); font-size: 12px; opacity: 0.8; }
 .sv-line-text { flex: 1; min-width: 0; }
 
-/* ---------- 扩展面板里的抽屉 ---------- */
-.sv-drawer { display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
-.sv-drawer .sv-field { padding: 4px 0; }
-.sv-drawer .sv-btn { align-self: flex-start; }
-.sv-drawer .sv-hint { margin: 0; }
-
 /* ---------- 悬浮球和播放面板 ---------- */
 #st_voice_ball {
     position: fixed;

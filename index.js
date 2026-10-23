@@ -5,7 +5,7 @@ import { createPlayer } from './src/player.js';
 import { NARRATOR, KIND_LABEL, requestLabels } from './src/analyze.js';
 import { openSettings } from './src/settings.js';
 import { createWidget } from './src/widget.js';
-import { el, button, toggle, field, input, openWindow } from './src/ui.js';
+import { el, button, input, openWindow } from './src/ui.js';
 
 const MODULE = 'st_voice';
 const PROVIDERS = { fish };
@@ -244,20 +244,17 @@ const applyEnabled = () => {
     widget.refresh();
 };
 const openSettingsWindow = () => openSettings(settings(), PROVIDERS, {
-    cardKey, cardName, onChange: (key) => { if (key === 'widget') widget.refresh(); },
+    cardKey, cardName, onChange: (key) => { if (key === 'widget' || key === 'enabled') applyEnabled(); },
 });
 
-// 扩展面板里的抽屉：开关 + 打开设置窗口
-function buildDrawer() {
-    const drawer = el('div');
-    drawer.id = 'st_voice_drawer';
-    drawer.innerHTML = '<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>酒馆语音</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content st-voice sv-drawer"></div></div>';
-    drawer.querySelector('.sv-drawer').append(
-        field('启用', '', toggle(settings().enabled, (value) => { settings().enabled = value; context().saveSettingsDebounced(); applyEnabled(); })),
-        button('打开设置窗口', openSettingsWindow, { kind: 'sv-primary', iconName: 'fa-sliders' }),
-        el('div', 'sv-hint', '消息操作栏里的喇叭播放这条消息，列表按钮看预览；聊天页上的悬浮球是播放面板。'),
-    );
-    return drawer;
+// 入口放在左下角 ≡ 菜单里（和智绘姬一样），不占扩展面板
+function addMenuEntry() {
+    const entry = el('a', 'interactable');
+    entry.id = 'option_st_voice';
+    entry.tabIndex = 0;
+    entry.innerHTML = '<i class="fa-lg fa-solid fa-headphones"></i><span>语音设置</span>';
+    entry.addEventListener('click', () => { $('#options').hide(); openSettingsWindow(); });
+    $('#option_toggle_AN').after(entry);
 }
 
 jQuery(async () => {
@@ -273,7 +270,7 @@ jQuery(async () => {
         onSettings: openSettingsWindow,
         onMode: (mode) => { settings().mode = mode; ctx.saveSettingsDebounced(); },
     });
-    $('#extensions_settings2').append(buildDrawer());
+    addMenuEntry();
     applyEnabled();
 
     $('#message_template .extraMesButtons, #chat .extraMesButtons').prepend(BUTTONS);

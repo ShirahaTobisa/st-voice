@@ -213,6 +213,7 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
                 }));
                 paintModes();
                 content.append(
+                    card('', '', switchFor('enabled', '启用酒馆语音', '关了就不显示消息上的按钮和悬浮球')),
                     card('模式', '', modes),
                     card('触发', '',
                         switchFor('autoPlay', '回复结束自动播放'),
