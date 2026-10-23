@@ -2,7 +2,7 @@
 import fish from './src/providers/fish.js';
 import { extractLines, highlight, clearHighlight, setMarks, hash } from './src/text.js';
 import { createPlayer } from './src/player.js';
-import { NARRATOR, KIND_LABEL, requestLabels } from './src/analyze.js';
+import { NARRATOR, KIND_LABEL, langName, requestLabels } from './src/analyze.js';
 import { openSettings } from './src/settings.js';
 import { createWidget } from './src/widget.js';
 import { el, button, input, openWindow } from './src/ui.js';
@@ -82,7 +82,20 @@ function castNames() {
 }
 
 const linesKey = (lines) => hash(lines.map((line) => line.text).join('\n'));
-const savedLabels = (message, lines) => (message.extra?.st_voice?.hash === linesKey(lines) ? message.extra.st_voice.labels : null);
+// 谁的声音是别的语言：分析时让模型顺便把这些人的台词翻译过去。换了语言，存过的分析就作废
+function targetsOf() {
+    const ctx = context();
+    const targets = {};
+    const add = (name, voice) => { if (voice?.lang) targets[name] = langName(voice.lang); };
+    for (const person of cast()) if (person.name !== NARRATOR) add(person.name, person);
+    add(NARRATOR, voiceFor(NARRATOR));
+    if (settings().userLines) add(ctx.name1, voiceFor(ctx.name1));
+    return targets;
+}
+const savedLabels = (message, lines) => {
+    const saved = message.extra?.st_voice;
+    return saved?.hash === linesKey(lines) && JSON.stringify(saved.targets || {}) === JSON.stringify(targetsOf()) ? saved.labels : null;
+};
 
 // 分析这条消息谁说的、什么语气；结果存在消息里，文字没变就不再问模型；新人物自动进配音表
 async function analyze(messageId, lines, force = false) {
@@ -93,10 +106,11 @@ async function analyze(messageId, lines, force = false) {
     // 状态栏、变量这类行不给模型看，直接记成旁白
     const picked = lines.map((line, i) => [line, i]).filter(([line]) => line.kind !== 'status');
     if (!picked.length) throw new Error('这条消息只有状态栏、变量，没有能分析的正文');
-    const partial = await requestLabels(picked.map(([line]) => line), { names: castNames(), user: ctx.name1, profile: cardProfile() }, settings().llm);
-    const labels = lines.map(() => [NARRATOR, '']);
+    const targets = targetsOf();
+    const partial = await requestLabels(picked.map(([line]) => line), { names: castNames(), user: ctx.name1, profile: cardProfile(), targets }, settings().llm);
+    const labels = lines.map(() => [NARRATOR, '', '']);
     picked.forEach(([, i], j) => { labels[i] = partial[j]; });
-    (message.extra ??= {}).st_voice = { hash: linesKey(lines), labels };
+    (message.extra ??= {}).st_voice = { hash: linesKey(lines), labels, targets };
     if (cardKey()) {
         const people = settings().cast[cardKey()] ??= [];
         for (const [speaker] of labels) {
@@ -121,9 +135,10 @@ function itemsOf(message, lines, labels) {
         return indexed.filter((line) => keep(line) && (!s.quotesOnly || line.kind === 'quote')).map((line) => withVoice({ ...line, tone: '' }, voice));
     }
     const user = context().name1;
-    return indexed.map((line) => ({ ...line, speaker: labels[line.index][0], tone: labels[line.index][1] }))
+    // 有译文的句子合成译文，屏幕上高亮的还是原文（range 没变）
+    return indexed.map((line) => ({ ...line, speaker: labels[line.index][0], tone: labels[line.index][1], translation: labels[line.index][2] || '' }))
         .filter((line) => keep(line) && (line.speaker !== NARRATOR || s.narrateInCast) && (line.speaker !== user || s.userLines))
-        .map((line) => withVoice({ ...line, tone: line.speaker === NARRATOR ? '' : line.tone }, voiceFor(line.speaker)));
+        .map((line) => withVoice({ ...line, original: line.text, text: line.translation || line.text, tone: line.speaker === NARRATOR ? '' : line.tone }, voiceFor(line.speaker)));
 }
 
 // from：从第几句开始；only：只播这一句
@@ -175,7 +190,7 @@ function refreshMarks() {
             const lines = extractLines(root);
             const labels = settings().mode === 'cast' ? savedLabels(message, lines) : null;
             if (settings().mode === 'cast' && !labels) continue;
-            marks.set(messageId, itemsOf(message, lines, labels).map(({ index, range, text, speaker, tone, kind }) => ({ index, range, text, speaker, tone, kind })));
+            marks.set(messageId, itemsOf(message, lines, labels).map(({ index, range, original, text, speaker, tone, kind }) => ({ index, range, text: original || text, speaker, tone, kind })));
             watchFrames(root);
         }
     }
@@ -261,7 +276,9 @@ async function preview(messageId) {
         const node = el('div', `sv-line${voiced.has(line.range) ? '' : ' sv-skipped'}`);
         if (isCast) node.append(input(labels[i][0], { list: 'st_voice_names', placeholder: '说话人' }), input(labels[i][1], { placeholder: '语气（英文）' }));
         else node.append(el('span', 'sv-kind', KIND_LABEL[line.kind]));
-        node.append(el('div', 'sv-line-text', line.text));
+        const text = el('div', 'sv-line-text', line.text);
+        if (labels?.[i]?.[2]) text.append(el('div', 'sv-line-trans', `→ ${labels[i][2]}`));
+        node.append(text);
         return node;
     });
     const hidden = rows.filter((node) => !node).length;
@@ -282,7 +299,7 @@ async function preview(messageId) {
         message.extra.st_voice.labels = rows.map((node, i) => {
             if (!node) return labels[i];
             const [speaker, tone] = node.querySelectorAll('input');
-            return [speaker.value.trim() || NARRATOR, tone.value.trim()];
+            return [speaker.value.trim() || NARRATOR, tone.value.trim(), labels[i][2] || ''];
         });
         await ctx.saveChat();
         refreshMarks();

@@ -157,6 +157,8 @@ body.st-voice-off .st_voice_play, body.st-voice-off .st_voice_preview { display:
 .sv-line .sv-input:nth-child(2) { width: 14em; }
 .sv-kind { flex-shrink: 0; padding: 2px 8px; border-radius: 999px; background: var(--sv-card); font-size: 12px; opacity: 0.8; }
 .sv-line-text { flex: 1; min-width: 0; }
+.sv-line-trans { margin-top: 2px; font-size: 12.5px; color: var(--sv-accent); opacity: 0.85; }
+.sv-row .sv-select.sv-lang { width: auto; padding: 5px 8px; font-size: 12.5px; }
 
 /* ---------- 悬浮球和播放面板 ---------- */
 #st_voice_ball {

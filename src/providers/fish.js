@@ -34,6 +34,7 @@ const toVoice = (item) => ({
     title: item.title || item._id,
     tags: (item.tags || []).slice(0, 6).join(' / '),
     sample: item.samples?.[0]?.audio || '',
+    lang: item.languages?.[0] || '',
 });
 
 export default {
@@ -74,7 +75,8 @@ export default {
         const response = await fetch(`${API}/model?self=true&page_size=50&sort_by=created_at`, { headers: auth(settings) });
         if (!response.ok) throw await fail('读取我的音色', response);
         const data = await response.json();
-        return (data.items || []).map((item) => ({ ...toVoice(item), tags: `${item.state === 'trained' ? '可用' : item.state} · ${new Date(item.created_at).toLocaleDateString()}` }));
+        // Fish 对自己克隆的音色猜的语言不准，语言留给用户在人物行上选
+        return (data.items || []).map((item) => ({ ...toVoice(item), lang: '', tags: `${item.state === 'trained' ? '可用' : item.state} · ${new Date(item.created_at).toLocaleDateString()}` }));
     },
 
     // 用音频文件克隆：建一个私有音色，建好马上能用；只传一个文件时可以附上文字稿
@@ -88,7 +90,7 @@ export default {
         if (text && files.length === 1) form.append('texts', text);
         const response = await fetch(`${API}/model`, { method: 'POST', headers: auth(settings), body: form });
         if (!response.ok) throw await fail('克隆', response);
-        return toVoice(await response.json());
+        return { ...toVoice(await response.json()), lang: '' };
     },
 
     async remove(id, settings) {

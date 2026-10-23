@@ -1,8 +1,10 @@
-// 角色配音：让模型判断每句是谁说的、什么语气
+// 角色配音：让模型判断每句是谁说的、什么语气；声音是别的语言的人物，顺便把台词翻译过去
 import { log } from './log.js';
 
 export const NARRATOR = '旁白';
 export const KIND_LABEL = { quote: '对白', action: '动作', paren: '括号', text: '叙述', status: '状态' };
+export const LANGS = { zh: '中文', ja: '日文', en: '英文', ko: '韩文', de: '德文', fr: '法文', es: '西班牙文', ru: '俄文', pt: '葡萄牙文', it: '意大利文' };
+export const langName = (code) => LANGS[code] || code || '';
 
 const SYSTEM = `你是一部有声剧的配音导演。下面是一段角色扮演正文，已按行编号，每行开头标了类型（对白 / 叙述 / 动作 / 括号）。请判断每一行由谁来念、用什么语气念，列出配音表。
 
@@ -19,30 +21,35 @@ const SYSTEM = `你是一部有声剧的配音导演。下面是一段角色扮�
 8. 要贴合这一句的内容和前后文，同一个人在不同句子可以不同，不要千篇一律。
 9. 「${NARRATOR}」的语气固定写 calm narration。
 
-输出：
-只输出一个 JSON 数组，不要解释、不要 Markdown 代码块。每个元素是 [行号, "说话人", "语气"]，行号从 1 开始，正文有几行就要有几个元素，不能漏也不能重复。
-示例：[[1,"${NARRATOR}","calm narration"],[2,"阿玲","playful and feigning sternness"]]`;
+翻译：
+10. 「需要翻译的说话人」里列出的人，配音的声音是另一种语言。这些人的每一句都要在第 4 个位置给出对应语言的译文：自然口语、保留语气和称呼、不加解释、不加引号；这句本来就是那种语言就留空。没列出的人第 4 个位置留空。
 
-const buildPrompt = (lines, { names, user, profile }) => {
+输出：
+只输出一个 JSON 数组，不要解释、不要 Markdown 代码块。每个元素是 [行号, "说话人", "语气", "译文"]，行号从 1 开始，正文有几行就要有几个元素，不能漏也不能重复。
+示例：[[1,"${NARRATOR}","calm narration",""],[2,"阿玲","playful and feigning sternness","もう、覗き見は入場料を取るわよ！"]]`;
+
+const buildPrompt = (lines, { names, user, profile, targets = {} }) => {
     const head = [`已知人物：${names.join('、') || '（正文里出现谁就用谁的名字）'}`, `用户扮演：${user}`];
+    const pairs = Object.entries(targets);
+    head.push(pairs.length ? `需要翻译的说话人：${pairs.map(([name, language]) => `${name} → ${language}`).join('，')}` : '需要翻译的说话人：（没有，第 4 个位置都留空）');
     if (profile) head.push(`角色设定摘录：${profile}`);
     return `${head.join('\n')}\n\n正文：\n${lines.map((line, i) => `${i + 1}. [${KIND_LABEL[line.kind]}] ${line.text}`).join('\n')}`;
 };
 
-// 模型偶尔会多说话或少个括号，先按 JSON 解析，不行就逐条正则捞
+// 模型偶尔会多说话或少个括号，先按 JSON 解析，不行就逐条正则捞。每行记 [说话人, 语气, 译文]
 export function parseLabels(text, count) {
-    const labels = Array.from({ length: count }, () => [NARRATOR, '']);
+    const labels = Array.from({ length: count }, () => [NARRATOR, '', '']);
     let rows = [];
     try {
         rows = JSON.parse(text.slice(text.indexOf('['), text.lastIndexOf(']') + 1));
     } catch {
-        rows = [...text.matchAll(/\[\s*(\d+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\]/g)].map((m) => [m[1], m[2], m[3]]);
+        rows = [...text.matchAll(/\[\s*(\d+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"(?:\s*,\s*"([^"]*)")?\s*\]/g)].map((m) => [m[1], m[2], m[3], m[4] || '']);
     }
     for (const row of rows) {
         if (!Array.isArray(row)) continue;
-        const [index, speaker, tone] = row;
+        const [index, speaker, tone, translation] = row;
         const i = Number(index) - 1;
-        if (labels[i]) labels[i] = [String(speaker ?? '').trim() || NARRATOR, String(tone ?? '').trim()];
+        if (labels[i]) labels[i] = [String(speaker ?? '').trim() || NARRATOR, String(tone ?? '').trim(), String(translation ?? '').trim()];
     }
     return labels;
 }
@@ -73,7 +80,7 @@ export async function requestLabels(lines, info, llm) {
     log('分析', text ? '模型回复' : '模型没有返回正文', text || (reasoning ? `[只有思考过程]\n${reasoning}` : ''));
     if (!text) throw new Error(reasoning ? '模型只返回了思考过程，没给出结果：换个不思考的模型，或者到接口那边把输出上限调大' : '模型没有返回内容');
     const labels = parseLabels(text, lines.length);
-    log('分析', `解析出 ${labels.filter(([speaker]) => speaker !== NARRATOR).length} 句台词，${new Set(labels.map(([speaker]) => speaker)).size} 个说话人`);
+    log('分析', `解析出 ${labels.filter(([speaker]) => speaker !== NARRATOR).length} 句台词，${new Set(labels.map(([speaker]) => speaker)).size} 个说话人，${labels.filter(([, , translation]) => translation).length} 句有译文`);
     return labels;
 }
 
