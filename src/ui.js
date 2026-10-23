@@ -88,7 +88,12 @@ export function openWindow({ title, iconName = 'fa-headphones', badge = '', smal
             pages.forEach((p) => p.item.classList.toggle('active', p === page));
             content.replaceChildren();
             content.scrollTop = 0;
-            page.render(content);
+            try {
+                page.render(content);
+            } catch (error) {
+                console.error('[st-voice]', error);
+                content.append(el('div', 'sv-empty', `这一页没画出来：${error.message}`));
+            }
         };
         for (const page of pages) {
             page.item = el('div', 'sv-nav-item');
