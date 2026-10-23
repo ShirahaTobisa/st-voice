@@ -15,7 +15,7 @@ const DEFAULTS = {
     speed: 1, provider: 'fish', fish: { ...fish.defaults }, narrator: { id: '', title: '' }, cast: {},
     llm: { source: 'current', url: '', key: '', model: '', models: [] },
 };
-const BUTTONS = '<div title="播放语音" class="mes_button st_voice_play fa-solid fa-volume-high"></div><div title="语音预览" class="mes_button st_voice_preview fa-solid fa-list-check"></div>';
+const BUTTONS = '<div title="播放语音" class="mes_button st_voice_play fa-solid fa-volume-high"></div><div title="语音预览（角色配音模式下会先分析）" class="mes_button st_voice_preview fa-solid fa-list-check"></div>';
 
 const context = () => SillyTavern.getContext();
 const settings = () => context().extensionSettings[MODULE];
@@ -23,7 +23,10 @@ const provider = () => PROVIDERS[settings().provider];
 const cardKey = () => { const ctx = context(); return ctx.groupId ? `group:${ctx.groupId}` : ctx.characters[ctx.characterId]?.avatar || ''; };
 const cardName = () => { const ctx = context(); return ctx.groupId ? ctx.groups.find((g) => g.id === ctx.groupId)?.name || '群聊' : ctx.characters[ctx.characterId]?.name || ''; };
 const cast = () => settings().cast[cardKey()] || [];
-const voiceFor = (name) => (cast().find((p) => p.name === name && p.id) || cast().find((p) => p.name === NARRATOR && p.id) || settings().narrator).id;
+// 声音对象：id 是 Fish 的音色，ref 是存在酒馆里的参考音频；都没有就是空对象，让 Fish 用默认声音
+const hasVoice = (voice) => !!(voice && (voice.id || voice.ref));
+const voiceFor = (name) => [cast().find((p) => p.name === name), cast().find((p) => p.name === NARRATOR), settings().narrator].find(hasVoice) || {};
+const voiceKey = (voice) => voice.id || voice.ref?.path || '';
 const messageText = (id) => document.querySelector(`#chat .mes[mesid="${id}"] .mes_text`);
 const mesid = (element) => Number($(element).closest('.mes').attr('mesid'));
 const lastReply = () => context().chat.findLastIndex((message) => !message.is_user && !message.is_system);
@@ -83,7 +86,12 @@ async function analyze(messageId, lines, force = false) {
     const key = hash(lines.map((line) => line.text).join('\n'));
     const saved = message.extra?.st_voice;
     if (!force && saved?.hash === key) return saved.labels;
-    const labels = await requestLabels(lines, { names: castNames(), user: ctx.name1, profile: cardProfile() }, settings().llm);
+    // 状态栏、变量这类行不给模型看，直接记成旁白
+    const picked = lines.map((line, i) => [line, i]).filter(([line]) => line.kind !== 'status');
+    if (!picked.length) throw new Error('这条消息只有状态栏、变量，没有能分析的正文');
+    const partial = await requestLabels(picked.map(([line]) => line), { names: castNames(), user: ctx.name1, profile: cardProfile() }, settings().llm);
+    const labels = lines.map(() => [NARRATOR, '']);
+    picked.forEach(([, i], j) => { labels[i] = partial[j]; });
     (message.extra ??= {}).st_voice = { hash: key, labels };
     if (cardKey()) {
         const people = settings().cast[cardKey()] ??= [];
@@ -101,14 +109,15 @@ function itemsOf(message, lines, labels) {
     const s = settings();
     const key = `${s.provider}|${s[s.provider].model}`;
     const keep = (line) => (line.kind !== 'status' || (line.speaker && line.speaker !== NARRATOR)) && !(s.skipParen && line.kind === 'paren') && !(s.skipAction && line.kind === 'action');
+    const withVoice = (line, voice) => ({ ...line, key, voice, voiceKey: voiceKey(voice) });
     if (!labels) {
         const voice = voiceFor(message.name);
-        return lines.filter((line) => keep(line) && (!s.quotesOnly || line.kind === 'quote')).map((line) => ({ ...line, key, voice, tone: '' }));
+        return lines.filter((line) => keep(line) && (!s.quotesOnly || line.kind === 'quote')).map((line) => withVoice({ ...line, tone: '' }, voice));
     }
     const user = context().name1;
-    return lines.map((line, i) => ({ ...line, key, speaker: labels[i][0], tone: labels[i][1] }))
+    return lines.map((line, i) => ({ ...line, speaker: labels[i][0], tone: labels[i][1] }))
         .filter((line) => keep(line) && (line.speaker !== NARRATOR || s.narrateInCast) && (line.speaker !== user || s.userLines))
-        .map((line) => ({ ...line, voice: voiceFor(line.speaker), tone: line.speaker === NARRATOR ? '' : line.tone }));
+        .map((line) => withVoice({ ...line, tone: line.speaker === NARRATOR ? '' : line.tone }, voiceFor(line.speaker)));
 }
 
 async function play(messageId) {
@@ -166,20 +175,23 @@ async function preview(messageId) {
     const names = el('datalist');
     names.id = 'st_voice_names';
     for (const name of [NARRATOR, ctx.name1, ...castNames()]) names.append(new Option(name));
+    // 状态栏、变量这类行不显示，只提一句跳过了几行
     const rows = lines.map((line, i) => {
+        if (line.kind === 'status') return null;
         const node = el('div', `sv-line${voiced.has(line.range) ? '' : ' sv-skipped'}`);
         if (isCast) node.append(input(labels[i][0], { list: 'st_voice_names', placeholder: '说话人' }), input(labels[i][1], { placeholder: '语气（英文）' }));
         else node.append(el('span', 'sv-kind', KIND_LABEL[line.kind]));
         node.append(el('div', 'sv-line-text', line.text));
         return node;
     });
+    const hidden = rows.filter((node) => !node).length;
     const footer = [
         ...(isCast ? [button('重新分析', () => win.close('again'), { iconName: 'fa-rotate' })] : []),
         button('播放', () => win.close('play'), { kind: 'sv-primary', iconName: 'fa-play' }),
         button('关闭', () => win.close(null)),
     ];
     const win = openWindow({ title: '语音预览', iconName: 'fa-list-check', small: true, footer });
-    win.content.append(names, el('div', 'sv-hint', isCast ? '可以改说话人和语气，改完点播放。灰的是不会念的句子。' : '灰的是按当前设置不会读的句子。'), ...rows);
+    win.content.append(names, el('div', 'sv-hint', `${isCast ? '可以改说话人和语气，改完点播放。灰的是不会念的句子。' : '灰的是按当前设置不会读的句子。'}${hidden ? ` 另有 ${hidden} 行状态栏、变量之类的已自动跳过。` : ''}`), ...rows.filter(Boolean));
     const result = await win.closed;
     if (result === 'again') {
         delete message.extra.st_voice;
@@ -187,13 +199,30 @@ async function preview(messageId) {
     }
     if (result !== 'play') return;
     if (isCast) {
-        message.extra.st_voice.labels = rows.map((node) => {
+        message.extra.st_voice.labels = rows.map((node, i) => {
+            if (!node) return labels[i];
             const [speaker, tone] = node.querySelectorAll('input');
             return [speaker.value.trim() || NARRATOR, tone.value.trim()];
         });
         await ctx.saveChat();
     }
     play(messageId);
+}
+
+// 面板上的「分析」：重新分析最新回复，分析完打开预览
+async function analyzeLatest() {
+    const messageId = lastReply();
+    const root = messageText(messageId);
+    if (!root) return toastr.info('没有可以分析的回复', '语音');
+    try {
+        widget.setState({ state: 'analyzing' });
+        await analyze(messageId, extractLines(root), true);
+    } catch (error) {
+        return toastr.error(error.message, '语音');
+    } finally {
+        if (playingId == null) widget.setState();
+    }
+    preview(messageId);
 }
 
 // 回复渲染完：按设置自动播放或自动分析；流式开始时的占位消息和重复触发都跳过
@@ -239,6 +268,7 @@ jQuery(async () => {
         settings,
         onPlayLatest: () => play(lastReply()),
         onStop: stop,
+        onAnalyze: analyzeLatest,
         onPreview: () => preview(lastReply()),
         onSettings: openSettingsWindow,
         onMode: (mode) => { settings().mode = mode; ctx.saveSettingsDebounced(); },

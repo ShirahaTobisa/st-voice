@@ -10,7 +10,7 @@ export function createPlayer({ synthesize, onLine, onState }) {
     let session = null;
 
     const load = async (item, signal) => {
-        const key = hash(`${item.key}|${item.voice}|${item.tone}\n${item.text}`);
+        const key = hash(`${item.key}|${item.voiceKey}|${item.tone}\n${item.text}`);
         const cached = await getAudio(key);
         if (cached) return cached;
         const blob = await synthesize(item, signal);

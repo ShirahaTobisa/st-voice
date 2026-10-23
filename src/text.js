@@ -68,13 +68,29 @@ export function extractLines(root, maxLength = 160) {
             if (current) lines.push(current);
         }
     }
-    return lines.map(({ kind, pieces: parts }) => {
+    const result = lines.map(({ kind, pieces: parts }) => {
         const range = parts[0].node.ownerDocument.createRange();
         range.setStart(parts[0].node, parts[0].start);
         range.setEnd(parts.at(-1).node, parts.at(-1).end);
         const text = parts.map((p) => p.node.data.slice(p.start, p.end)).join('').replace(/\s+/g, ' ').trim();
         return { kind: kind === 'text' && looksLikeStatus(text) ? 'status' : kind, range, text };
     });
+    // 状态栏是一整块：挨着状态行的短行（「位置」「罗德岛食堂」），或夹在两条状态行中间的任何一行，也算状态；反复扫到没有变化为止
+    const shortLabel = (text) => text.length <= 12 && !/[。！？!?…，,]/.test(text);
+    const isStatus = (line) => line?.kind === 'status';
+    for (let changed = true, pass = 0; changed && pass < 8; pass += 1) {
+        changed = false;
+        result.forEach((line, i) => {
+            if (line.kind !== 'text') return;
+            const before = isStatus(result[i - 1]);
+            const after = isStatus(result[i + 1]);
+            if ((before && after) || ((before || after) && shortLabel(line.text))) {
+                line.kind = 'status';
+                changed = true;
+            }
+        });
+    }
+    return result;
 }
 
 // 高亮用 CSS 自定义高亮，不改正文；句子在 iframe 里时要在那个窗口里登记，样式也补进去

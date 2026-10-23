@@ -1,5 +1,22 @@
 // Fish Audio：合成走 OpenAI 兼容接口，声音库搜索、我的音色、克隆音色走原生接口；这几个都允许网页直连
+import { fileToBase64 } from '../files.js';
+
 const API = 'https://api.fish.audio';
+const referenceCache = new Map();
+
+// 参考音频存在酒馆里，合成时取出来转成 base64 随请求发；同一个文件只转一次
+const referenceAudio = (path) => {
+    if (!referenceCache.has(path)) {
+        referenceCache.set(path, fetch(`/${path}`).then((response) => {
+            if (!response.ok) throw new Error('参考音频文件不见了，重新选一下声音');
+            return response.blob();
+        }).then(fileToBase64).catch((error) => {
+            referenceCache.delete(path);
+            throw error;
+        }));
+    }
+    return referenceCache.get(path);
+};
 const HINTS = { 401: '密钥不对或已失效', 402: '余额不足', 403: '没有权限，免费账号可能用不了这个模型', 404: '模型或声音不存在', 429: '请求太频繁，稍等再试' };
 const MESSAGES = { 'Reference not found': '声音 ID 不存在', 'Invalid Token': '密钥不对' };
 
@@ -28,13 +45,15 @@ export default {
         { id: 'fish-audio/s2.1-pro', label: 'S2.1 Pro' },
     ],
 
-    // 语气按 S2 的写法放在句首方括号里
+    // 语气按 S2 的写法放在句首方括号里；voice 是声音对象：id 是声音库或账号里的音色，ref 是存在酒馆里的参考音频（不占名额）
     async synthesize({ text, voice, tone }, settings, signal) {
+        const body = { model: settings.model, input: tone ? `[${tone}] ${text}` : text, voice: voice?.id || undefined, response_format: 'mp3' };
+        if (voice?.ref) body.provider = { options: { 'fish-audio': { references: [{ audio: await referenceAudio(voice.ref.path), text: voice.ref.text || '' }] } } };
         const response = await fetch(`${API}/compat/v1/audio/speech`, {
             method: 'POST',
             signal,
             headers: { 'Content-Type': 'application/json', ...auth(settings) },
-            body: JSON.stringify({ model: settings.model, input: tone ? `[${tone}] ${text}` : text, voice: voice || undefined, response_format: 'mp3' }),
+            body: JSON.stringify(body),
         });
         if (!response.ok) throw await fail('Fish Audio', response);
         return response.blob();

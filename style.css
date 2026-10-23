@@ -181,7 +181,7 @@ body.st-voice-off .st_voice_play, body.st-voice-off .st_voice_preview { display:
 .sv-progress { height: 4px; margin: 10px 0 12px; overflow: hidden; border-radius: 2px; background: color-mix(in srgb, var(--sv-text) 15%, transparent); }
 .sv-progress div { height: 100%; width: 0; background: var(--sv-accent); transition: width 0.2s; }
 .sv-panel-controls { display: flex; gap: 8px; }
-.sv-panel-controls .sv-btn:first-child, .sv-panel-controls .sv-btn:nth-child(2) { flex: 1; }
+.sv-panel-controls .sv-btn.sv-primary { flex: 1; }
 
 /* ---------- 窄屏 ---------- */
 @media (max-width: 720px) {
