@@ -50,22 +50,24 @@ export async function requestLabels(lines, info, llm) {
     const context = SillyTavern.getContext();
     const prompt = buildPrompt(lines, info);
     let text;
+    let reasoning = '';
     if (llm.source === 'custom') {
         if (!llm.url || !llm.model) throw new Error('先在设置里填分析接口的地址，再获取并选好模型');
+        // 不传 max_tokens，输出多长由接口自己定（会思考的模型要先把思考写完）
         const result = await context.ChatCompletionService.processRequest({
             stream: false,
             messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt }],
-            max_tokens: 400 + lines.length * 40,
             model: llm.model,
             chat_completion_source: 'openai',
             reverse_proxy: llm.url,
             proxy_password: llm.key,
         }, {}, true);
         text = result?.content || '';
+        reasoning = result?.reasoning || '';
     } else {
         text = await context.generateRaw({ systemPrompt: SYSTEM, prompt });
     }
-    if (!text) throw new Error('模型没有返回内容');
+    if (!text) throw new Error(reasoning ? '模型只返回了思考过程，没给出结果：换个不思考的模型，或者到接口那边把输出上限调大' : '模型没有返回内容');
     return parseLabels(text, lines.length);
 }
 

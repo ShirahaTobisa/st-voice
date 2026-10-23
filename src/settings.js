@@ -14,14 +14,45 @@ const playSample = (url) => {
 };
 const playButton = (url) => button('', () => playSample(url), { kind: 'sv-icon', iconName: 'fa-play', title: '试听' });
 const busy = (node, iconName, label, on) => node.replaceChildren(icon(on ? 'fa-spinner fa-spin' : iconName), el('span', '', label));
+const confirmPopup = async (text) => {
+    const ctx = context();
+    return await ctx.callGenericPopup(text, ctx.POPUP_TYPE.CONFIRM) === ctx.POPUP_RESULT.AFFIRMATIVE;
+};
+const fileExt = (file) => (file.name.match(/\.([a-z0-9]{1,5})$/i)?.[1] || 'mp3').toLowerCase();
 
-// 挑声音，三个来源：公共声音库搜索、自己克隆过的音色、用音频文件克隆新音色。选中交给 onPick
-function voicePicker(provider, providerSettings, onPick) {
+// ---- 参考音频音色库：条目存在 settings.library（名字、酒馆里的文件路径、文字稿），人物行只引用它，按路径认 ----
+const refVoice = (entry) => ({ id: '', title: entry.title, sample: `/${entry.path}`, ref: { path: entry.path, text: entry.text || '' } });
+const refUsers = (settings, path) => [settings.narrator, ...Object.values(settings.cast).flat()].filter((voice) => voice?.ref?.path === path);
+async function addRef(settings, { title, file, text }) {
+    const entry = { title, path: await uploadFile(`st-voice-${Date.now()}.${fileExt(file)}`, file), text };
+    settings.library.push(entry);
+    context().saveSettingsDebounced();
+    return refVoice(entry);
+}
+// 改名、改文字稿、换音频后，库和用到它的人物一起更新
+function patchRef(settings, path, patch) {
+    const users = refUsers(settings, path);
+    const entry = settings.library.find((item) => item.path === path);
+    if (!entry) return;
+    Object.assign(entry, patch);
+    for (const user of users) Object.assign(user, refVoice(entry));
+    context().saveSettingsDebounced();
+}
+async function removeRef(settings, path) {
+    await deleteFile(path);
+    settings.library = settings.library.filter((item) => item.path !== path);
+    for (const user of refUsers(settings, path)) Object.assign(user, { id: '', title: '', sample: '', ref: null });
+    context().saveSettingsDebounced();
+}
+
+// 挑声音，三个来源：公共声音库搜索、我的音色（参考音频 + Fish 账号里克隆的）、用音频文件克隆新音色。选中交给 onPick，库有变动叫 onRefresh
+function voicePicker(provider, settings, { onPick, onRefresh }) {
+    const providerSettings = settings[settings.provider];
     const box = el('div', 'sv-picker');
     const seg = el('div', 'sv-seg');
     const panes = [];
     const voiceRows = (items, extra) => items.map((voice) => row(voice.title, voice.title, voice.tags,
-        playButton(voice.sample), button('选用', () => onPick(voice), { kind: 'sv-primary' }), ...(extra ? [extra(voice)] : [])));
+        playButton(voice.sample), button('选用', () => onPick(voice), { kind: 'sv-primary' }), ...(extra ? extra(voice) : [])));
     const show = (target) => {
         for (const pane of panes) {
             pane.node.hidden = pane !== target;
@@ -63,23 +94,78 @@ function voicePicker(provider, providerSettings, onPick) {
     keyword.addEventListener('keydown', (event) => event.key === 'Enter' && load(1));
     library.append(search, results, more);
 
-    // 我的音色
-    const mine = el('div', 'sv-list');
-    const loadMine = async () => {
-        mine.replaceChildren(el('div', 'sv-empty', '读取中…'));
+    // 我的音色：参考音频（能改能删）+ Fish 账号里克隆的
+    const mine = el('div');
+    const refList = el('div', 'sv-list');
+    const fishList = el('div', 'sv-list');
+    const refEditor = (entry) => {
+        const editor = el('div', 'sv-editor');
+        const name = input(entry.title, { placeholder: '名字' });
+        const text = Object.assign(el('textarea', 'sv-input sv-textarea'), { rows: 2, value: entry.text || '', placeholder: '这段音频说的文字，可不填' });
+        const file = Object.assign(el('input'), { type: 'file', accept: 'audio/*', hidden: true });
+        const chosen = el('span', 'sv-hint', '不换音频');
+        file.addEventListener('change', () => { chosen.textContent = file.files[0]?.name || '不换音频'; });
+        const pickRow = el('div', 'sv-search');
+        pickRow.append(button('换音频', () => file.click(), { iconName: 'fa-file-audio' }), chosen);
+        const save = button('保存', async () => {
+            busy(save, 'fa-check', '保存中…', true);
+            try {
+                const patch = { title: name.value.trim() || entry.title, text: text.value.trim() };
+                if (file.files[0]) {
+                    const old = entry.path;
+                    patch.path = await uploadFile(`st-voice-${Date.now()}.${fileExt(file.files[0])}`, file.files[0]);
+                    deleteFile(old);
+                }
+                patchRef(settings, entry.path, patch);
+                toastr.success('改好了', '语音');
+                paintRefs();
+                onRefresh?.();
+            } catch (error) {
+                toastr.error(error.message, '语音');
+                busy(save, 'fa-check', '保存', false);
+            }
+        }, { kind: 'sv-primary', iconName: 'fa-check' });
+        editor.append(name, pickRow, text, save);
+        return editor;
+    };
+    const paintRefs = () => {
+        refList.replaceChildren(...settings.library.map((entry) => {
+            const voice = refVoice(entry);
+            const editor = el('div');
+            editor.hidden = true;
+            const wrap = el('div');
+            wrap.append(row(entry.title, entry.title, `参考音频 · ${entry.text ? entry.text.slice(0, 24) : '没有文字稿'}`,
+                playButton(voice.sample),
+                button('选用', () => onPick(voice), { kind: 'sv-primary' }),
+                button('', () => {
+                    editor.hidden = !editor.hidden;
+                    if (!editor.childElementCount) editor.append(refEditor(entry));
+                }, { kind: 'sv-icon', iconName: 'fa-pen', title: '改名字、文字稿，或换音频' }),
+                button('', async () => {
+                    if (!await confirmPopup(`删掉参考音频「${entry.title}」？用了它的人物会变回默认声音。`)) return;
+                    await removeRef(settings, entry.path);
+                    paintRefs();
+                    onRefresh?.();
+                }, { kind: 'sv-icon', iconName: 'fa-trash', title: '删除' })), editor);
+            return wrap;
+        }));
+        if (!settings.library.length) refList.append(el('div', 'sv-empty', '还没有参考音频，到「克隆新音色」里加'));
+    };
+    const paintFish = async () => {
+        fishList.replaceChildren(el('div', 'sv-empty', '读取中…'));
         try {
             const items = await provider.listOwn(providerSettings);
-            mine.replaceChildren(...voiceRows(items, (voice) => button('', async () => {
-                const ctx = context();
-                if (await ctx.callGenericPopup(`删掉音色「${voice.title}」？删了就没了。`, ctx.POPUP_TYPE.CONFIRM) !== ctx.POPUP_RESULT.AFFIRMATIVE) return;
+            fishList.replaceChildren(...voiceRows(items, (voice) => [button('', async () => {
+                if (!await confirmPopup(`删掉 Fish 账号里的音色「${voice.title}」？删了就没了。`)) return;
                 await provider.remove(voice.id, providerSettings).catch((error) => toastr.error(error.message, '语音'));
-                loadMine();
-            }, { kind: 'sv-icon', iconName: 'fa-trash', title: '删除' })));
-            if (!items.length) mine.append(el('div', 'sv-empty', '还没有克隆过的音色'));
+                paintFish();
+            }, { kind: 'sv-icon', iconName: 'fa-trash', title: '删除' })]));
+            if (!items.length) fishList.append(el('div', 'sv-empty', '账号里还没有克隆过的音色'));
         } catch (error) {
-            mine.replaceChildren(el('div', 'sv-empty', error.message));
+            fishList.replaceChildren(el('div', 'sv-empty', error.message));
         }
     };
+    mine.append(el('div', 'sv-subtitle', '参考音频（存在酒馆里，不占名额）'), refList, el('div', 'sv-subtitle', 'Fish 账号里的音色'), fishList);
 
     // 克隆新音色
     const clone = el('div');
@@ -105,21 +191,17 @@ function voicePicker(provider, providerSettings, onPick) {
         }, { kind, iconName });
         return node;
     };
-    // 参考音频：存到酒馆的用户文件里，合成时随请求发给 Fish，不占账号名额
-    const useReference = cloneAction('sv-primary', 'fa-file-audio', '用参考音频', async (name, [file], transcript) => {
-        const ext = (file.name.match(/\.([a-z0-9]{1,5})$/i)?.[1] || 'mp3').toLowerCase();
-        const path = await uploadFile(`st-voice-${Date.now()}.${ext}`, file);
-        return { id: '', title: name, sample: `/${path}`, ref: { path, text: transcript } };
-    });
+    // 参考音频：存进音色库和酒馆的用户文件，合成时随请求发给 Fish，不占账号名额
+    const useReference = cloneAction('sv-primary', 'fa-file-audio', '用参考音频', (name, [file], transcript) => addRef(settings, { title: name, file, text: transcript }));
     // 建成 Fish 音色：存在账号里，占名额，可以多段音频
     const makeModel = cloneAction('', 'fa-wand-magic-sparkles', '建成 Fish 音色', (name, fileList, transcript) => provider.clone({ title: name, files: fileList, text: transcript }, providerSettings));
     const actions = el('div', 'sv-search');
     actions.append(useReference, makeModel);
-    clone.append(el('div', 'sv-hint', '选一段干净的单人说话音频（mp3 / wav / m4a，10 到 30 秒最合适，别带背景音乐）。「用参考音频」把音频存在酒馆里，每次合成随请求发给 Fish，不占你账号的音色名额；「建成 Fish 音色」在你的 Fish 账号里建一个私有音色（占名额，可以选多段音频，之后合成不用再传音频）。'),
+    clone.append(el('div', 'sv-hint', '选一段干净的单人说话音频（mp3 / wav / m4a，10 到 30 秒最合适，别带背景音乐）。「用参考音频」把音频存在酒馆里，进「我的音色」，每次合成随请求发给 Fish，不占你账号的音色名额；「建成 Fish 音色」在你的 Fish 账号里建一个私有音色（占名额，可以选多段音频，之后合成不用再传音频）。'),
         title, files, pickRow, text, actions);
 
     addPane('声音库', library, () => { if (!results.childElementCount) load(1); });
-    addPane('我的音色', mine, loadMine);
+    addPane('我的音色', mine, () => { paintRefs(); paintFish(); });
     addPane('克隆新音色', clone);
     box.prepend(seg);
     show(panes[0]);
@@ -127,36 +209,29 @@ function voicePicker(provider, providerSettings, onPick) {
 }
 
 // 一行「名字 + 当前声音 + 试听 / 换声音 / 删除」，点换声音在下面展开选声音
-function voiceRow(provider, providerSettings, name, voice, { onPick, onRemove }) {
+function voiceRow(provider, settings, name, voice, { onPick, onRemove, onRefresh }) {
     const picker = el('div');
     picker.hidden = true;
+    const current = voice?.ref ? `参考音频 · ${voice.title}` : voice?.title || '用默认声音';
     const actions = [playButton(voice?.sample), button('换声音', () => {
         picker.hidden = !picker.hidden;
-        if (!picker.childElementCount) picker.append(voicePicker(provider, providerSettings, onPick));
+        if (!picker.childElementCount) picker.append(voicePicker(provider, settings, { onPick, onRefresh }));
     }, { iconName: 'fa-shuffle' })];
     if (onRemove) actions.push(button('', onRemove, { kind: 'sv-icon', iconName: 'fa-trash', title: '删除' }));
     const wrap = el('div');
-    wrap.append(row(name, name, voice?.title || '用默认声音', ...actions), picker);
+    wrap.append(row(name, name, current, ...actions), picker);
     return wrap;
 }
 
 export async function openSettings(settings, providers, { cardKey, cardName, onChange }) {
     const ctx = context();
     const provider = providers[settings.provider];
-    const providerSettings = settings[settings.provider];
     const save = (key, value) => {
         settings[key] = value;
         ctx.saveSettingsDebounced();
         onChange?.(key, value);
     };
     const switchFor = (key, label, hint = '') => field(label, hint, toggle(!!settings[key], (value) => save(key, value)));
-    // 换掉或删掉一个参考音频声音后，文件没人用了就从酒馆里删掉
-    const release = (old) => {
-        const path = old?.ref?.path;
-        if (!path) return;
-        const used = [settings.narrator, ...Object.values(settings.cast).flat()].some((voice) => voice?.ref?.path === path);
-        if (!used) deleteFile(path);
-    };
 
     // 分析用的模型：酒馆当前连接，或自己填一个 OpenAI 兼容接口（地址 + 密钥 + 从接口拉的模型列表）
     const llm = settings.llm;
@@ -191,7 +266,7 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
         llmBox.append(
             field('接口地址', '到 /v1 为止，例如 https://api.openai.com/v1；请求由酒馆后端转发', input(llm.url, { placeholder: 'https://…/v1' }, (v) => { llm.url = v.replace(/\/+$/, ''); ctx.saveSettingsDebounced(); })),
             field('密钥', '', input(llm.key, { placeholder: 'sk-…', secret: true }, (v) => { llm.key = v; ctx.saveSettingsDebounced(); })),
-            field('模型', '点「获取模型」从接口拉列表再选', modelRow),
+            field('模型', '点「获取模型」从接口拉列表再选；会思考的模型要慢一些', modelRow),
         );
     };
     paintLlm();
@@ -239,8 +314,9 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
             render(content) {
                 const saveFish = (key, value) => { settings.fish[key] = value; ctx.saveSettingsDebounced(); };
                 const narrator = el('div');
-                const paintNarrator = () => narrator.replaceChildren(voiceRow(provider, providerSettings, '默认声音', settings.narrator, {
-                    onPick: (voice) => { const old = settings.narrator; save('narrator', voice); release(old); paintNarrator(); },
+                const paintNarrator = () => narrator.replaceChildren(voiceRow(provider, settings, '默认声音', settings.narrator, {
+                    onPick: (voice) => { save('narrator', voice); paintNarrator(); },
+                    onRefresh: paintNarrator,
                 }));
                 paintNarrator();
                 content.append(
@@ -248,7 +324,7 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
                         field('密钥', '', input(settings.fish.key, { placeholder: 'sk-fish-…', secret: true }, (v) => saveFish('key', v))),
                         field('模型', '免费版可能把请求内容留存用于训练，私密内容建议用付费版',
                             select(provider.models.map((m) => [m.id, m.label]), settings.fish.model, (v) => saveFish('model', v)))),
-                    card('默认声音', '朗读模式和旁白用它。可以从 Fish 公共声音库挑，也可以用自己的音频克隆一个', narrator),
+                    card('默认声音', '朗读模式和旁白用它。可以从 Fish 公共声音库挑，也可以用自己的音频克隆一个；克隆过的都在「换声音 → 我的音色」里管理', narrator),
                 );
             },
         },
@@ -261,9 +337,10 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
                 const list = el('div');
                 const persist = () => { settings.cast[key] = people; ctx.saveSettingsDebounced(); paintList(); };
                 const paintList = () => {
-                    list.replaceChildren(...people.map((person) => voiceRow(provider, providerSettings, person.name, person, {
-                        onPick: (voice) => { const old = { ...person }; Object.assign(person, { id: '', title: '', sample: '', ref: null }, voice); persist(); release(old); },
-                        onRemove: () => { people.splice(people.indexOf(person), 1); persist(); release(person); },
+                    list.replaceChildren(...people.map((person) => voiceRow(provider, settings, person.name, person, {
+                        onPick: (voice) => { Object.assign(person, { id: '', title: '', sample: '', ref: null }, voice); persist(); },
+                        onRemove: () => { people.splice(people.indexOf(person), 1); persist(); },
+                        onRefresh: paintList,
                     })));
                     if (!people.length) list.append(el('div', 'sv-empty', '还没有人物。角色配音分析过一次后会自动加进来，也可以在下面手动加'));
                 };

@@ -115,6 +115,9 @@ body.st-voice-off .st_voice_play, body.st-voice-off .st_voice_preview { display:
 .sv-field .sv-search { width: min(100%, 340px); margin: 0; }
 .sv-picker { padding: 6px 0 4px 46px; }
 .sv-picker > .sv-seg { display: inline-flex; margin: 4px 0 8px; }
+.sv-subtitle { margin: 10px 0 2px; font-size: 13px; font-weight: 600; opacity: 0.8; }
+.sv-editor { padding: 6px 0 10px 46px; }
+.sv-editor .sv-input, .sv-editor .sv-textarea { display: block; width: 100%; margin: 6px 0; }
 .sv-picker .sv-input, .sv-picker .sv-textarea { display: block; width: 100%; margin: 6px 0; }
 .sv-textarea { resize: vertical; font-family: inherit; }
 .sv-search .sv-hint { align-self: center; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
