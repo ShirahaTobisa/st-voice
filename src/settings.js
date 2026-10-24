@@ -59,11 +59,10 @@ function refEditor(settings, entry, onSaved) {
     file.addEventListener('change', () => { chosen.textContent = file.files[0]?.name || '不换音频'; });
     const pickRow = el('div', 'sv-search');
     pickRow.append(button('换音频', () => file.click(), { iconName: 'fa-file-audio' }), chosen);
-    const lang = langSelect(entry.lang, () => {});
     const save = button('保存', async () => {
         busy(save, 'fa-check', '保存中…', true);
         try {
-            const patch = { title: name.value.trim() || entry.title, text: text.value.trim(), lang: lang.value };
+            const patch = { title: name.value.trim() || entry.title, text: text.value.trim() };
             if (file.files[0]) {
                 const old = entry.path;
                 patch.path = await uploadFile(`st-voice-${Date.now()}.${fileExt(file.files[0])}`, file.files[0]);
@@ -77,13 +76,11 @@ function refEditor(settings, entry, onSaved) {
             busy(save, 'fa-check', '保存', false);
         }
     }, { kind: 'sv-primary', iconName: 'fa-check' });
-    const bottom = el('div', 'sv-search');
-    bottom.append(el('span', 'sv-hint', '语言'), lang, el('div', 'sv-spacer'), save);
-    editor.append(name, pickRow, text, bottom);
+    editor.append(name, pickRow, text, save);
     return editor;
 }
 
-// 参考音频列表：试听、（选用）、编辑、删除。给 onPick 才有「选用」
+// 参考音频列表：每行一个语言下拉、试听、（选用）、编辑、删除。给 onPick 才有「选用」
 function referenceList(settings, { onPick, onRefresh } = {}) {
     const node = el('div', 'sv-list');
     const paint = () => {
@@ -91,7 +88,7 @@ function referenceList(settings, { onPick, onRefresh } = {}) {
             const voice = refVoice(entry);
             const editor = el('div');
             editor.hidden = true;
-            const actions = [playButton(voice.sample)];
+            const actions = [langSelect(entry.lang, (lang) => { patchRef(settings, entry.path, { lang }); onRefresh?.(); }), playButton(voice.sample)];
             if (onPick) actions.push(button('选用', () => onPick(voice), { kind: 'sv-primary' }));
             actions.push(
                 button('', () => {
@@ -106,7 +103,7 @@ function referenceList(settings, { onPick, onRefresh } = {}) {
                 }, { kind: 'sv-icon', iconName: 'fa-trash', title: '删除' }),
             );
             const wrap = el('div');
-            wrap.append(row(entry.title, entry.title, `参考音频${entry.lang ? ` · ${langName(entry.lang)}` : ''} · ${entry.text ? entry.text.slice(0, 24) : '没有文字稿'}`, ...actions), editor);
+            wrap.append(row(entry.title, entry.title, `参考音频 · ${entry.text ? entry.text.slice(0, 24) : '没有文字稿'}`, ...actions), editor);
             return wrap;
         }));
         if (!settings.library.length) node.append(el('div', 'sv-empty', '还没有参考音频，用下面的「克隆新音色」加'));
@@ -114,17 +111,19 @@ function referenceList(settings, { onPick, onRefresh } = {}) {
     return { node, paint };
 }
 
-// Fish 账号里克隆的音色：（选用）、删除
-function fishVoiceList(provider, providerSettings, { onPick } = {}) {
+// Fish 账号里克隆的音色：每行一个语言下拉（记在 settings.fishLangs）、（选用）、删除
+function fishVoiceList(provider, settings, { onPick } = {}) {
+    const providerSettings = settings[settings.provider];
     const node = el('div', 'sv-list');
     let loaded = [];
     const paint = async () => {
         node.replaceChildren(el('div', 'sv-empty', '读取中…'));
         try {
-            loaded = await provider.listOwn(providerSettings);
+            loaded = (await provider.listOwn(providerSettings)).map((voice) => ({ ...voice, lang: settings.fishLangs[voice.id] || '' }));
             node.replaceChildren(...loaded.map((voice) => row(voice.title, voice.title, voice.tags,
+                langSelect(voice.lang, (lang) => { voice.lang = lang; settings.fishLangs[voice.id] = lang; context().saveSettingsDebounced(); }),
                 playButton(voice.sample),
-                ...(onPick ? [button('选用', () => onPick(voice), { kind: 'sv-primary' })] : []),
+                ...(onPick ? [button('选用', () => onPick({ ...voice }), { kind: 'sv-primary' })] : []),
                 button('', async () => {
                     if (!await confirmPopup(`删掉 Fish 账号里的音色「${voice.title}」？删了就没了。`)) return;
                     await provider.remove(voice.id, providerSettings).catch((error) => toastr.error(error.message, '语音'));
@@ -156,6 +155,7 @@ function cloneForm(provider, settings, { onDone }) {
             busy(node, iconName, '处理中…', true);
             try {
                 const voice = { ...await run(title.value.trim(), [...files.files], text.value.trim()), lang: lang.value };
+                if (voice.id) { settings.fishLangs[voice.id] = lang.value; context().saveSettingsDebounced(); }
                 toastr.success(`「${voice.title}」好了`, '语音');
                 title.value = '';
                 files.value = '';
@@ -172,12 +172,10 @@ function cloneForm(provider, settings, { onDone }) {
     const useReference = cloneAction('sv-primary', 'fa-file-audio', '用参考音频', (name, [file], transcript) => addRef(settings, { title: name, file, text: transcript, lang: lang.value }));
     // 建成 Fish 音色：存在账号里，占名额，可以多段音频
     const makeModel = cloneAction('', 'fa-wand-magic-sparkles', '建成 Fish 音色', (name, fileList, transcript) => provider.clone({ title: name, files: fileList, text: transcript }, providerSettings));
-    const langRow = el('div', 'sv-search');
-    langRow.append(el('span', 'sv-hint', '这个声音念什么语言'), lang);
     const actions = el('div', 'sv-search');
     actions.append(useReference, makeModel);
-    form.append(el('div', 'sv-hint', '选一段干净的单人说话音频（mp3 / wav / m4a，10 到 30 秒最合适，别带背景音乐）。「用参考音频」把音频存在酒馆里，每次合成随请求发给 Fish，不占你账号的音色名额；「建成 Fish 音色」在你的 Fish 账号里建一个私有音色（占名额，可以选多段音频，之后合成不用再传音频）。声音是别的语言的，选上语言，分析时会把台词翻译过去再念。'),
-        title, files, pickRow, text, langRow, actions);
+    form.append(el('div', 'sv-hint', '选一段干净的单人说话音频（mp3 / wav / m4a，10 到 30 秒最合适，别带背景音乐）。「用参考音频」把音频存在酒馆里，每次合成随请求发给 Fish，不占你账号的音色名额；「建成 Fish 音色」在你的 Fish 账号里建一个私有音色（占名额，可以选多段音频，之后合成不用再传音频）。'),
+        title, files, pickRow, text, field('这个声音念什么语言', '选了别的语言，角色配音分析时会把台词翻译过去再念', lang), actions);
     return form;
 }
 
@@ -214,7 +212,6 @@ function testCard(provider, settings, fishVoices) {
 
 // 挑声音，三个来源：公共声音库搜索、我的音色（参考音频 + Fish 账号里克隆的）、用音频文件克隆新音色。选中交给 onPick，库有变动叫 onRefresh
 function voicePicker(provider, settings, { onPick, onRefresh }) {
-    const providerSettings = settings[settings.provider];
     const box = el('div', 'sv-picker');
     const seg = el('div', 'sv-seg');
     const panes = [];
@@ -261,7 +258,7 @@ function voicePicker(provider, settings, { onPick, onRefresh }) {
 
     // 我的音色
     const refs = referenceList(settings, { onPick, onRefresh });
-    const fishes = fishVoiceList(provider, providerSettings, { onPick });
+    const fishes = fishVoiceList(provider, settings, { onPick });
     const mine = el('div');
     mine.append(el('div', 'sv-subtitle', '参考音频（存在酒馆里，不占名额）'), refs.node, el('div', 'sv-subtitle', 'Fish 账号里的音色'), fishes.node);
 
@@ -399,12 +396,11 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
         {
             label: '音色库', icon: 'fa-microphone-lines',
             render(content) {
-                const providerSettings = settings[settings.provider];
                 const refs = referenceList(settings);
-                const fishes = fishVoiceList(provider, providerSettings);
+                const fishes = fishVoiceList(provider, settings);
                 content.append(
-                    card('参考音频', '存在酒馆里，合成时随请求发给 Fish，不占账号名额。要给人物用，到配音表那一行点「换声音 → 我的音色」', refs.node),
-                    card('Fish 账号里的音色', '用「建成 Fish 音色」克隆出来的，存在你的 Fish 账号里', fishes.node),
+                    card('参考音频', '存在酒馆里，合成时随请求发给 Fish，不占账号名额。每条前面的下拉是这个声音念什么语言，选了别的语言，角色配音分析时会把台词翻译过去。要给人物用，到配音表那一行点「换声音 → 我的音色」', refs.node),
+                    card('Fish 账号里的音色', '用「建成 Fish 音色」克隆出来的，存在你的 Fish 账号里；前面的下拉同样是念什么语言', fishes.node),
                     card('克隆新音色', '', cloneForm(provider, settings, { onDone: () => { refs.paint(); fishes.paint(); } })),
                     card('试一句', '挑个声音念一句，顺便看看语气写法管不管用；不进缓存', testCard(provider, settings, fishes.voices)),
                 );

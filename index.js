@@ -13,7 +13,7 @@ const PROVIDERS = { fish };
 const DEFAULTS = {
     enabled: true, widget: true, mode: 'read', autoPlay: false, autoAnalyze: false, dblclick: false,
     quotesOnly: false, skipParen: true, skipAction: false, narrateInCast: false, userLines: false,
-    speed: 1, provider: 'fish', fish: { ...fish.defaults }, narrator: { id: '', title: '' }, cast: {}, library: [],
+    speed: 1, provider: 'fish', fish: { ...fish.defaults }, narrator: { id: '', title: '' }, cast: {}, library: [], fishLangs: {},
     llm: { source: 'current', url: '', key: '', model: '', models: [] },
 };
 const BUTTONS = '<div title="播放语音" class="mes_button st_voice_play fa-solid fa-volume-high"></div><div title="语音预览（角色配音模式下会先分析）" class="mes_button st_voice_preview fa-solid fa-list-check"></div>';
