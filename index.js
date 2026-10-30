@@ -1,5 +1,12 @@
 // 酒馆语音：把回复读出来（朗读），或先让模型分出每句谁说的、再按人物配音（角色配音）
 import fish from './src/providers/fish.js';
+import openai from './src/providers/openai.js';
+import minimax from './src/providers/minimax.js';
+import volcengine from './src/providers/volcengine.js';
+import elevenlabs from './src/providers/elevenlabs.js';
+import azure from './src/providers/azure.js';
+import google from './src/providers/google.js';
+import edge from './src/providers/edge.js';
 import { extractLines, highlight, clearHighlight, setMarks, hash } from './src/text.js';
 import { createPlayer } from './src/player.js';
 import { NARRATOR, KIND_LABEL, langName, requestLabels } from './src/analyze.js';
@@ -9,11 +16,13 @@ import { el, button, input, openWindow } from './src/ui.js';
 import { log } from './src/log.js';
 
 const MODULE = 'st_voice';
-const PROVIDERS = { fish };
+const PROVIDERS = { fish, openai, minimax, volcengine, elevenlabs, azure, google, edge };
+// 每个提供商的设置各放一个键（和它的 id 同名）
+const providerDefaults = () => Object.fromEntries(Object.values(PROVIDERS).map((item) => [item.id, { ...item.defaults }]));
 const DEFAULTS = {
     enabled: true, widget: true, mode: 'read', autoPlay: false, autoAnalyze: false, dblclick: false,
     quotesOnly: false, skipParen: true, skipAction: false, narrateInCast: false, userLines: false,
-    speed: 1, provider: 'fish', fish: { ...fish.defaults }, narrator: { id: '', title: '' }, cast: {}, library: [], fishLangs: {},
+    speed: 1, provider: 'fish', ...providerDefaults(), narrator: { id: '', title: '' }, cast: {}, library: [], fishLangs: {},
     llm: { source: 'current', url: '', key: '', model: '', models: [] },
 };
 const BUTTONS = '<div title="播放语音" class="mes_button st_voice_play fa-solid fa-volume-high"></div><div title="语音预览（角色配音模式下会先分析）" class="mes_button st_voice_preview fa-solid fa-list-check"></div>';
@@ -24,8 +33,9 @@ const provider = () => PROVIDERS[settings().provider];
 const cardKey = () => { const ctx = context(); return ctx.groupId ? `group:${ctx.groupId}` : ctx.characters[ctx.characterId]?.avatar || ''; };
 const cardName = () => { const ctx = context(); return ctx.groupId ? ctx.groups.find((g) => g.id === ctx.groupId)?.name || '群聊' : ctx.characters[ctx.characterId]?.name || ''; };
 const cast = () => settings().cast[cardKey()] || [];
-// 声音对象：id 是 Fish 的音色，ref 是存在酒馆里的参考音频；都没有就是空对象，让 Fish 用默认声音
-const hasVoice = (voice) => !!(voice && (voice.id || voice.ref));
+// 声音对象：id 是接口认的音色（Fish 是声音库 ID，OpenAI 兼容接口是名字），ref 是存在酒馆里的参考音频；
+// 带 provider 标记，别的提供商下选的声音当没选（老数据没标记的都是 Fish 的）
+const hasVoice = (voice) => !!(voice && (voice.id || voice.ref) && (voice.provider || 'fish') === settings().provider);
 const voiceFor = (name) => [cast().find((p) => p.name === name), cast().find((p) => p.name === NARRATOR), settings().narrator].find(hasVoice) || {};
 const voiceKey = (voice) => voice.id || voice.ref?.path || '';
 const messageText = (id) => document.querySelector(`#chat .mes[mesid="${id}"] .mes_text`);
@@ -126,7 +136,7 @@ async function analyze(messageId, lines, force = false) {
 // 按设置挑出要读的句子，配上声音和语气；index 是句子在正文里的序号，点句播放用
 function itemsOf(message, lines, labels) {
     const s = settings();
-    const key = `${s.provider}|${s[s.provider].model}`;
+    const key = `${s.provider}|${s[s.provider].model || ''}`;
     const keep = (line) => (line.kind !== 'status' || (line.speaker && line.speaker !== NARRATOR)) && !(s.skipParen && line.kind === 'paren') && !(s.skipAction && line.kind === 'action');
     const withVoice = (line, voice) => ({ ...line, key, voice, voiceKey: voiceKey(voice) });
     const indexed = lines.map((line, index) => ({ ...line, index }));
@@ -344,7 +354,7 @@ const applyEnabled = () => {
     refreshMarks();
 };
 const openSettingsWindow = () => openSettings(settings(), PROVIDERS, {
-    cardKey, cardName, onChange: (key) => { if (key === 'widget' || key === 'enabled' || key === 'mode') applyEnabled(); },
+    cardKey, cardName, onChange: (key) => { if (['widget', 'enabled', 'mode', 'provider'].includes(key)) applyEnabled(); },
 });
 
 // 入口放在左下角 ≡ 菜单里（和智绘姬一样），不占扩展面板
@@ -360,7 +370,9 @@ function addMenuEntry() {
 jQuery(async () => {
     const ctx = context();
     const saved = ctx.extensionSettings[MODULE] || {};
-    ctx.extensionSettings[MODULE] = { ...DEFAULTS, ...saved, fish: { ...DEFAULTS.fish, ...saved.fish }, llm: { ...DEFAULTS.llm, ...saved.llm } };
+    const merged = { ...DEFAULTS, ...saved, llm: { ...DEFAULTS.llm, ...saved.llm } };
+    for (const id of Object.keys(PROVIDERS)) merged[id] = { ...DEFAULTS[id], ...saved[id] };
+    ctx.extensionSettings[MODULE] = merged;
     // 老版本把参考音频只挂在人物上，这里补进音色库
     const s = settings();
     for (const voice of [s.narrator, ...Object.values(s.cast).flat()]) {

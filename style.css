@@ -116,6 +116,8 @@ body.st-voice-off .st_voice_play, body.st-voice-off .st_voice_preview { display:
 .sv-btn.sv-primary { background: var(--sv-tint); border-color: var(--sv-tint-border); font-weight: 600; }
 .sv-btn.sv-icon { width: 34px; height: 34px; padding: 0; flex-shrink: 0; }
 .sv-btn.sv-ghost { border-color: transparent; background: transparent; opacity: 0.75; }
+.sv-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+.sv-btn.sv-chip { padding: 3px 10px; border-radius: 999px; font-size: 12.5px; }
 .sv-btn.sv-ghost:hover { background: var(--sv-hover); opacity: 1; }
 
 /* ---------- 列表行（声音、人物） ---------- */

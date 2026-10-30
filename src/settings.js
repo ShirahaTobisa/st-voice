@@ -4,6 +4,8 @@ import { listAudio, deleteAudio, clearAudio } from './cache.js';
 import { NARRATOR, LANGS, langName, listModels } from './analyze.js';
 import { uploadFile, deleteFile } from './files.js';
 import { getLog, clearLog, exportLog, download } from './log.js';
+import { OFFICIAL, isOfficial } from './providers/fish.js';
+import { secretState, writeSecret, hasSecret } from './st-api.js';
 
 const context = () => SillyTavern.getContext();
 const sampleAudio = new Audio();
@@ -179,26 +181,32 @@ function cloneForm(provider, settings, { onDone }) {
     return form;
 }
 
-// 试一句：挑个声音、填句话和语气，合成了直接听，不进缓存
-function testCard(provider, settings, fishVoices) {
-    const providerSettings = settings[settings.provider];
+// 试一句：挑个声音、填句话和语气，合成了直接听，不进缓存。Fish 从下拉挑，别的接口填声音名字
+function testCard(provider, settings, fishVoices = () => []) {
+    const own = settings[provider.id];
+    const isFish = provider.id === 'fish';
     const text = input('这是一句试听用的话，听听这个声音合不合适。', { placeholder: '要念的话' });
     const tone = input('', { placeholder: '语气，英文短语，可不填，例如 soft and gentle' });
-    const choice = el('select', 'sv-select');
+    const choice = isFish ? el('select', 'sv-select') : input(settings.narrator?.id || '', { placeholder: provider.voicesHint || '声音名字，照接口文档填' });
     const fill = () => {
+        if (!isFish) return;
         choice.replaceChildren(new Option('默认声音', ''));
         for (const entry of settings.library) choice.append(new Option(`参考音频 · ${entry.title}`, `ref:${entry.path}`));
         for (const voice of fishVoices()) choice.append(new Option(`Fish · ${voice.title}`, voice.id));
     };
     fill();
-    choice.addEventListener('focus', fill);
+    if (isFish) choice.addEventListener('focus', fill);
+    const chosen = () => {
+        const value = choice.value.trim();
+        if (!isFish) return value ? { id: value, title: value } : {};
+        if (value.startsWith('ref:')) return refVoice(settings.library.find((entry) => `ref:${entry.path}` === value) || {});
+        return value ? { id: value, title: choice.selectedOptions[0].text } : {};
+    };
     const run = button('合成试听', async () => {
-        const value = choice.value;
-        const voice = value.startsWith('ref:') ? refVoice(settings.library.find((entry) => `ref:${entry.path}` === value) || {}) : (value ? { id: value, title: choice.selectedOptions[0].text } : {});
         if (!text.value.trim()) return toastr.warning('先写要念的话', '语音');
         busy(run, 'fa-play', '合成中…', true);
         try {
-            const blob = await provider.synthesize({ text: text.value.trim(), voice, tone: tone.value.trim() }, providerSettings);
+            const blob = await provider.synthesize({ text: text.value.trim(), voice: chosen(), tone: tone.value.trim() }, own);
             playSample(URL.createObjectURL(blob));
         } catch (error) {
             toastr.error(error.message, '语音');
@@ -206,12 +214,138 @@ function testCard(provider, settings, fishVoices) {
         busy(run, 'fa-play', '合成试听', false);
     }, { kind: 'sv-primary', iconName: 'fa-play' });
     const node = el('div');
-    node.append(field('声音', '', choice), field('要念的话', '', text), field('语气', '写在句首方括号里发给 Fish', tone), run);
+    node.append(field('声音', '', choice), field('要念的话', '', text), field('语气', isFish ? '写在句首方括号里发给 Fish' : provider.toneNote || '按「语气怎么传」的设置发', tone), run);
     return node;
+}
+
+// 不是 Fish 的接口：声音就是一个名字，填上或点这家的预设
+function namePicker(provider, own, onPick) {
+    const box = el('div', 'sv-picker');
+    const name = input('', { placeholder: '声音名字，照接口文档填' });
+    const use = () => { const id = name.value.trim(); if (id) onPick({ id, title: id, sample: '', lang: '' }); };
+    name.addEventListener('keydown', (event) => event.key === 'Enter' && use());
+    const line = el('div', 'sv-search');
+    line.append(name, button('选用', use, { kind: 'sv-primary' }));
+    const voices = provider.voicesFor?.(own) || [];
+    const chips = el('div', 'sv-chips');
+    for (const preset of voices) chips.append(button(preset, () => onPick({ id: preset, title: preset, sample: '', lang: '' }), { kind: 'sv-chip' }));
+    box.append(line, el('div', 'sv-hint', voices.length ? '下面是这家常用的声音名，点一个就选上' : '这家没有预设，照它的文档填声音名字或 ID'), chips);
+    return box;
+}
+
+// 模型：从接口拉列表挑，拉不到也能直接填
+function modelPicker(provider, own, saveOwn) {
+    const line = el('div', 'sv-search');
+    const list = el('datalist');
+    list.id = `sv-models-${provider.id}`;
+    const fill = () => list.replaceChildren(...(own.models || []).map((id) => new Option(id)));
+    fill();
+    const name = input(own.model, { placeholder: '模型名', list: list.id }, (v) => saveOwn('model', v));
+    const fetchButton = button('获取模型', async () => {
+        busy(fetchButton, 'fa-rotate', '获取中…', true);
+        try {
+            saveOwn('models', await provider.listModels(own));
+            fill();
+            toastr.success(`拿到 ${own.models.length} 个模型`, '语音');
+        } catch (error) {
+            toastr.error(error.message, '语音');
+        }
+        busy(fetchButton, 'fa-rotate', '获取模型', false);
+    }, { iconName: 'fa-rotate' });
+    line.append(list, name, fetchButton);
+    return line;
+}
+
+// 走酒馆后端的几家：这家接口给的声音列表（接口拉的或内置表），本地按名字、语言搜；有试听的带试听，给了 onPick 就能选用
+function voiceList(provider, own, { onPick } = {}) {
+    const node = el('div');
+    const keyword = input('', { placeholder: '按名字、语言、ID 搜' });
+    const results = el('div', 'sv-list');
+    let voices = [];
+    const show = () => {
+        const query = keyword.value.trim().toLowerCase();
+        const shown = voices.filter((voice) => !query || `${voice.title} ${voice.tags} ${voice.id}`.toLowerCase().includes(query));
+        results.replaceChildren(...shown.slice(0, 80).map((voice) => row(voice.title, voice.title, voice.tags,
+            ...(voice.sample ? [playButton(voice.sample)] : []),
+            ...(onPick ? [button('选用', () => onPick({ ...voice }), { kind: 'sv-primary' })] : []))));
+        if (!shown.length) results.append(el('div', 'sv-empty', voices.length ? '没搜到' : '没有声音'));
+        else if (shown.length > 80) results.append(el('div', 'sv-empty', `共 ${shown.length} 个，只列前 80 个，搜一下缩小范围`));
+    };
+    keyword.addEventListener('input', show);
+    const paint = async () => {
+        results.replaceChildren(el('div', 'sv-empty', '读取中…'));
+        try {
+            voices = await provider.listVoices(own);
+            show();
+        } catch (error) {
+            results.replaceChildren(el('div', 'sv-empty', error.message));
+        }
+    };
+    node.append(keyword, results);
+    return { node, paint };
+}
+
+// 走酒馆后端的几家挑声音：直接填 ID，或从列表里挑
+function nativePicker(provider, own, onPick) {
+    const box = el('div', 'sv-picker');
+    const name = input('', { placeholder: provider.voicesHint });
+    const use = () => { const id = name.value.trim(); if (id) onPick({ id, title: id, sample: '', lang: '' }); };
+    name.addEventListener('keydown', (event) => event.key === 'Enter' && use());
+    const line = el('div', 'sv-search');
+    line.append(name, button('选用', use, { kind: 'sv-primary' }));
+    const list = voiceList(provider, own, { onPick });
+    box.append(line, list.node);
+    list.paint();
+    return box;
+}
+
+// 密钥存在酒馆服务端的密钥库里（和酒馆自带的 TTS 扩展共用），这里只能写进去、看有没有，读不出来
+function secretsCard(provider) {
+    const rows = provider.secrets.map((secret) => {
+        const status = el('span', 'sv-hint', '查询中…');
+        const value = input('', { placeholder: '填了点保存就覆盖', secret: true });
+        const saveButton = button('保存', async () => {
+            if (!value.value.trim()) return toastr.warning(`先填 ${secret.label}`, '语音');
+            busy(saveButton, 'fa-floppy-disk', '保存中…', true);
+            try {
+                await writeSecret(secret.key, value.value.trim());
+                value.value = '';
+                status.textContent = '已保存';
+                toastr.success(`${secret.label} 存进酒馆了`, '语音');
+            } catch (error) {
+                toastr.error(error.message, '语音');
+            }
+            busy(saveButton, 'fa-floppy-disk', '保存', false);
+        }, { iconName: 'fa-floppy-disk' });
+        const line = el('div', 'sv-search');
+        line.append(value, saveButton, status);
+        return { secret, status, node: field(secret.label, secret.hint, line) };
+    });
+    secretState().then((state) => rows.forEach(({ secret, status }) => { status.textContent = hasSecret(state, secret.key) ? '已保存' : '未设置'; }));
+    return card('密钥', '存在酒馆服务端的密钥库里，和酒馆自带的 TTS 扩展共用；那边填过的这里直接显示已保存', ...rows.map((item) => item.node));
+}
+
+// 提供商自己声明的设置项：text 填、select 选、combo 填或从候选里挑
+function fieldsCard(provider, own, saveOwn) {
+    const controls = provider.fields.map((item) => {
+        if (item.type === 'select') return field(item.label, item.hint || '', select(item.options, own[item.key], (v) => saveOwn(item.key, v)));
+        const wrap = el('div');
+        const list = item.type === 'combo' ? Object.assign(el('datalist'), { id: `sv-${provider.id}-${item.key}` }) : null;
+        if (list) {
+            list.append(...item.options.map((option) => new Option(option)));
+            wrap.append(list);
+        }
+        wrap.append(input(own[item.key] ?? '', { placeholder: item.placeholder || '', list: list?.id || '' }, (v) => saveOwn(item.key, v.trim())));
+        return field(item.label, item.hint || '', wrap);
+    });
+    const hint = [provider.note, provider.toneNote && `语气：${provider.toneNote}`].filter(Boolean).join('。');
+    return card('接口', hint, ...controls);
 }
 
 // 挑声音，三个来源：公共声音库搜索、我的音色（参考音频 + Fish 账号里克隆的）、用音频文件克隆新音色。选中交给 onPick，库有变动叫 onRefresh
 function voicePicker(provider, settings, { onPick, onRefresh }) {
+    const pick = (voice) => onPick({ ...voice, provider: provider.id });
+    if (provider.id !== 'fish') return (provider.listVoices ? nativePicker : namePicker)(provider, settings[provider.id], pick);
     const box = el('div', 'sv-picker');
     const seg = el('div', 'sv-seg');
     const panes = [];
@@ -243,7 +377,7 @@ function voicePicker(provider, settings, { onPick, onRefresh }) {
         more.textContent = '加载中…';
         try {
             const { items, hasMore } = await provider.search({ title: keyword.value.trim(), language: language.value, page: next });
-            results.append(...items.map((voice) => row(voice.title, voice.title, voice.tags, playButton(voice.sample), button('选用', () => onPick(voice), { kind: 'sv-primary' }))));
+            results.append(...items.map((voice) => row(voice.title, voice.title, voice.tags, playButton(voice.sample), button('选用', () => pick(voice), { kind: 'sv-primary' }))));
             if (!results.childElementCount) results.append(el('div', 'sv-empty', '没搜到'));
             more.hidden = !hasMore;
         } catch (error) {
@@ -257,14 +391,14 @@ function voicePicker(provider, settings, { onPick, onRefresh }) {
     library.append(search, results, more);
 
     // 我的音色
-    const refs = referenceList(settings, { onPick, onRefresh });
-    const fishes = fishVoiceList(provider, settings, { onPick });
+    const refs = referenceList(settings, { onPick: pick, onRefresh });
+    const fishes = fishVoiceList(provider, settings, { onPick: pick });
     const mine = el('div');
     mine.append(el('div', 'sv-subtitle', '参考音频（存在酒馆里，不占名额）'), refs.node, el('div', 'sv-subtitle', 'Fish 账号里的音色'), fishes.node);
 
     addPane('声音库', library, () => { if (!results.childElementCount) load(1); });
     addPane('我的音色', mine, () => { refs.paint(); fishes.paint(); });
-    addPane('克隆新音色', cloneForm(provider, settings, { onDone: onPick }));
+    addPane('克隆新音色', cloneForm(provider, settings, { onDone: pick }));
     box.prepend(seg);
     show(panes[0]);
     return box;
@@ -289,7 +423,7 @@ function voiceRow(provider, settings, name, voice, { onPick, onRemove, onRefresh
 
 export async function openSettings(settings, providers, { cardKey, cardName, onChange }) {
     const ctx = context();
-    const provider = providers[settings.provider];
+    const provider = () => providers[settings.provider];
     const save = (key, value) => {
         settings[key] = value;
         ctx.saveSettingsDebounced();
@@ -374,35 +508,75 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
             },
         },
         {
-            label: 'Fish Audio', icon: 'fa-fish',
+            label: '语音接口', icon: 'fa-plug',
             render(content) {
-                const saveFish = (key, value) => { settings.fish[key] = value; ctx.saveSettingsDebounced(); };
-                const narrator = el('div');
-                const paintNarrator = () => narrator.replaceChildren(voiceRow(provider, settings, '默认声音', settings.narrator, {
-                    onPick: (voice) => { save('narrator', voice); paintNarrator(); },
-                    onLang: (lang) => { settings.narrator.lang = lang; ctx.saveSettingsDebounced(); },
-                    onRefresh: paintNarrator,
-                }));
-                paintNarrator();
-                content.append(
-                    card('接口', '密钥在 fish.audio 的 API Keys 页面创建，只存在酒馆的扩展设置里',
-                        field('密钥', '', input(settings.fish.key, { placeholder: 'sk-fish-…', secret: true }, (v) => saveFish('key', v))),
-                        field('模型', '免费版可能把请求内容留存用于训练，私密内容建议用付费版',
-                            select(provider.models.map((m) => [m.id, m.label]), settings.fish.model, (v) => saveFish('model', v)))),
-                    card('默认声音', '朗读模式和旁白用它。可以从 Fish 公共声音库挑，也可以用自己的音频克隆一个；克隆过的都在「音色库」页管理', narrator),
-                );
+                const paint = () => {
+                    content.replaceChildren();
+                    const p = provider();
+                    const own = settings[p.id];
+                    const saveOwn = (key, value) => { own[key] = value; ctx.saveSettingsDebounced(); };
+                    const narrator = el('div');
+                    const paintNarrator = () => narrator.replaceChildren(voiceRow(p, settings, '默认声音', settings.narrator, {
+                        onPick: (voice) => { save('narrator', voice); paintNarrator(); },
+                        onLang: (lang) => { settings.narrator.lang = lang; ctx.saveSettingsDebounced(); },
+                        onRefresh: paintNarrator,
+                    }));
+                    paintNarrator();
+                    content.append(card('', '', field('提供商', '换了提供商，人物的声音要重新选', select(Object.values(providers).map((item) => [item.id, item.label]), p.id, (v) => { save('provider', v); paint(); }))));
+                    if (p.id === 'fish') {
+                        // 合成不走官方时，参考音频、账号音色、建模型这几样还得直连官方，要一把官方密钥
+                        const official = card('Fish 官方密钥', '合成地址不是官方时才用得上：参考音频、账号里的音色、建成 Fish 音色只有官方接口有，这几样会用它直连官方；不填就用不了这几样',
+                            field('密钥', '在 fish.audio 的 API Keys 页面创建', input(own.officialKey, { placeholder: 'sk-fish-…', secret: true }, (v) => saveOwn('officialKey', v))));
+                        const paintOfficial = () => { official.hidden = isOfficial(own); };
+                        paintOfficial();
+                        content.append(
+                            card('合成走哪里', '官方、fish2api、new-api 这类中转都是同一个路径，填到域名为止就行；密钥就是这个地址的密钥，只存在酒馆的扩展设置里',
+                                field('接口地址', `留空就是官方 ${OFFICIAL}；走中转就填中转的地址`, input(own.url === OFFICIAL ? '' : own.url, { placeholder: OFFICIAL }, (v) => { saveOwn('url', v.replace(/\/+$/, '') || OFFICIAL); paintOfficial(); })),
+                                field('密钥', '', input(own.key, { placeholder: '这个地址的密钥', secret: true }, (v) => saveOwn('key', v))),
+                                field('模型', '免费版可能把请求内容留存用于训练，私密内容建议用付费版',
+                                    select(p.models.map((m) => [m.id, m.label]), own.model, (v) => saveOwn('model', v)))),
+                            official,
+                        );
+                    } else if (p.templates) {
+                        content.append(card('接口', '谁家的 TTS 只要是 OpenAI 格式都能接：POST 地址/v1/audio/speech，字段 model、input、voice、response_format',
+                            field('常用提供商', '选一家就把地址、模型、语气怎么传和声音名预设填好，密钥自己填；没列的选「自定义」',
+                                select(p.templates.map((item) => [item.id, item.label]), own.template || 'custom', (v) => { p.applyTemplate(own, v); ctx.saveSettingsDebounced(); paint(); })),
+                            field('接口地址', '到域名为止，例如 https://api.openai.com', input(own.url, { placeholder: 'https://…' }, (v) => saveOwn('url', v.replace(/\/+$/, '')))),
+                            field('密钥', '', input(own.key, { placeholder: 'sk-…', secret: true }, (v) => saveOwn('key', v))),
+                            field('模型', '点「获取模型」从接口拉列表挑，拉不到也可以直接填', modelPicker(p, own, saveOwn)),
+                            field('语气怎么传', '角色配音分析出的语气往请求的哪里放', select(p.toneModes, own.tone, (v) => saveOwn('tone', v)))));
+                    } else {
+                        // 走酒馆后端转发的几家：密钥进酒馆密钥库，其余设置项由提供商自己声明
+                        if (p.secrets.length) content.append(secretsCard(p));
+                        content.append(fieldsCard(p, own, saveOwn));
+                    }
+                    const narratorHint = { fish: '朗读模式和旁白用它。可以从 Fish 公共声音库挑，也可以用自己的音频克隆一个；克隆过的都在「音色库」页管理', openai: '朗读模式和旁白用它，填接口认的声音名字' }[p.id] || '朗读模式和旁白用它，点「换声音」从这家的声音列表里挑';
+                    content.append(card('默认声音', narratorHint, narrator));
+                };
+                paint();
             },
         },
         {
             label: '音色库', icon: 'fa-microphone-lines',
             render(content) {
+                const p = provider();
+                if (p.id !== 'fish') {
+                    const list = p.listVoices && voiceList(p, settings[p.id]);
+                    content.append(
+                        list ? card(`${p.label} 的声音`, '这家接口给的声音。要给人物用，到配音表那一行点「换声音」挑', list.node)
+                            : card('音色库', '只对 Fish Audio 有。OpenAI 兼容接口的声音就是一个名字，在配音表那一行点「换声音」直接填'),
+                        card('试一句', '挑个声音念一句，顺便看看语气传得对不对；不进缓存', testCard(p, settings)),
+                    );
+                    list?.paint();
+                    return;
+                }
                 const refs = referenceList(settings);
-                const fishes = fishVoiceList(provider, settings);
+                const fishes = fishVoiceList(p, settings);
                 content.append(
                     card('参考音频', '存在酒馆里，合成时随请求发给 Fish，不占账号名额。每条前面的下拉是这个声音念什么语言，选了别的语言，角色配音分析时会把台词翻译过去。要给人物用，到配音表那一行点「换声音 → 我的音色」', refs.node),
                     card('Fish 账号里的音色', '用「建成 Fish 音色」克隆出来的，存在你的 Fish 账号里；前面的下拉同样是念什么语言', fishes.node),
-                    card('克隆新音色', '', cloneForm(provider, settings, { onDone: () => { refs.paint(); fishes.paint(); } })),
-                    card('试一句', '挑个声音念一句，顺便看看语气写法管不管用；不进缓存', testCard(provider, settings, fishes.voices)),
+                    card('克隆新音色', '', cloneForm(p, settings, { onDone: () => { refs.paint(); fishes.paint(); } })),
+                    card('试一句', '挑个声音念一句，顺便看看语气写法管不管用；不进缓存', testCard(p, settings, fishes.voices)),
                 );
                 refs.paint();
                 fishes.paint();
@@ -417,7 +591,7 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
                 const list = el('div');
                 const persist = () => { settings.cast[key] = people; ctx.saveSettingsDebounced(); paintList(); };
                 const paintList = () => {
-                    list.replaceChildren(...people.map((person) => voiceRow(provider, settings, person.name, person, {
+                    list.replaceChildren(...people.map((person) => voiceRow(provider(), settings, person.name, person, {
                         onPick: (voice) => { Object.assign(person, { id: '', title: '', sample: '', ref: null, lang: '' }, voice); persist(); },
                         onLang: (lang) => { person.lang = lang; ctx.saveSettingsDebounced(); },
                         onRemove: () => { people.splice(people.indexOf(person), 1); persist(); },
