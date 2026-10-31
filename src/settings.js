@@ -16,6 +16,28 @@ const playSample = (url) => {
     sampleAudio.play().catch(() => {});
 };
 const playButton = (url) => button('', () => playSample(url), { kind: 'sv-icon', iconName: 'fa-play', title: '试听' });
+const SAMPLE_TEXT = { ja: 'これは試聴用の一文です。声の雰囲気を確かめてください。', en: 'This is a short sample sentence, just to hear how this voice sounds.', ko: '이것은 시청용 문장입니다. 목소리 분위기를 확인해 보세요.' };
+const sampleUrls = new Map();
+// 试听：有试听地址就直接放；没有就用这家接口按当前设置合成一句短的（花一次钱，这次打开页面期间记着）
+function voiceButton(provider, own, voice) {
+    const node = button('', async () => {
+        if (voice?.sample) return playSample(voice.sample);
+        if (!voice?.id && !voice?.ref) return toastr.info('还没选声音', '语音');
+        const key = `${provider.id}|${voice.id || voice.ref?.path}|${voice.lang || ''}`;
+        try {
+            if (!sampleUrls.has(key)) {
+                busy(node, 'fa-play', '', true);
+                const blob = await provider.synthesize({ text: SAMPLE_TEXT[voice.lang] || '这是一句试听用的话，听听这个声音合不合适。', voice, tone: '' }, own);
+                sampleUrls.set(key, URL.createObjectURL(blob));
+            }
+            playSample(sampleUrls.get(key));
+        } catch (error) {
+            toastr.error(error.message, '语音');
+        }
+        busy(node, 'fa-play', '', false);
+    }, { kind: 'sv-icon', iconName: 'fa-play', title: '试听' });
+    return node;
+}
 const busy = (node, iconName, label, on) => node.replaceChildren(icon(on ? 'fa-spinner fa-spin' : iconName), el('span', '', label));
 const confirmPopup = async (text) => {
     const ctx = context();
@@ -124,7 +146,7 @@ function fishVoiceList(provider, settings, { onPick } = {}) {
             loaded = (await provider.listOwn(providerSettings)).map((voice) => ({ ...voice, lang: settings.fishLangs[voice.id] || '' }));
             node.replaceChildren(...loaded.map((voice) => row(voice.title, voice.title, voice.tags,
                 langSelect(voice.lang, (lang) => { voice.lang = lang; settings.fishLangs[voice.id] = lang; context().saveSettingsDebounced(); }),
-                playButton(voice.sample),
+                voiceButton(provider, providerSettings, voice),
                 ...(onPick ? [button('选用', () => onPick({ ...voice }), { kind: 'sv-primary' })] : []),
                 button('', async () => {
                     if (!await confirmPopup(`删掉 Fish 账号里的音色「${voice.title}」？删了就没了。`)) return;
@@ -266,7 +288,7 @@ function voiceList(provider, own, { onPick } = {}) {
         const query = keyword.value.trim().toLowerCase();
         const shown = voices.filter((voice) => !query || `${voice.title} ${voice.tags} ${voice.id}`.toLowerCase().includes(query));
         results.replaceChildren(...shown.slice(0, 80).map((voice) => row(voice.title, voice.title, voice.tags,
-            ...(voice.sample ? [playButton(voice.sample)] : []),
+            voiceButton(provider, own, voice),
             ...(onPick ? [button('选用', () => onPick({ ...voice }), { kind: 'sv-primary' })] : []))));
         if (!shown.length) results.append(el('div', 'sv-empty', voices.length ? '没搜到' : '没有声音'));
         else if (shown.length > 80) results.append(el('div', 'sv-empty', `共 ${shown.length} 个，只列前 80 个，搜一下缩小范围`));
@@ -411,7 +433,7 @@ function voiceRow(provider, settings, name, voice, { onPick, onRemove, onRefresh
     const current = voice?.ref ? `参考音频 · ${voice.title}` : voice?.title || '用默认声音';
     const actions = [];
     if (voice && (voice.id || voice.ref) && onLang) actions.push(langSelect(voice.lang, onLang));
-    actions.push(playButton(voice?.sample), button('换声音', () => {
+    actions.push(voiceButton(provider, settings[provider.id], voice), button('换声音', () => {
         picker.hidden = !picker.hidden;
         if (!picker.childElementCount) picker.append(voicePicker(provider, settings, { onPick, onRefresh }));
     }, { iconName: 'fa-shuffle' }));
@@ -430,12 +452,33 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
         onChange?.(key, value);
     };
     const switchFor = (key, label, hint = '') => field(label, hint, toggle(!!settings[key], (value) => save(key, value)));
+    // 换提供商：这家的默认声音和配音表先收起来，换回来时原样拿出；换到没用过的那家只带人物名字
+    const switchProvider = (next) => {
+        const stash = settings.stash ??= {};
+        stash[settings.provider] = { narrator: settings.narrator, cast: settings.cast };
+        const kept = stash[next] || {};
+        const cast = kept.cast || {};
+        for (const [key, people] of Object.entries(settings.cast)) {
+            const list = cast[key] ??= [];
+            for (const person of people) if (!list.some((item) => item.name === person.name)) list.push({ name: person.name, id: '', title: '' });
+        }
+        settings.narrator = kept.narrator || { id: '', title: '' };
+        settings.cast = cast;
+        save('provider', next);
+    };
 
     // 分析用的模型：酒馆当前连接，或自己填一个 OpenAI 兼容接口（地址 + 密钥 + 从接口拉的模型列表）
     const llm = settings.llm;
     const llmBox = el('div');
     const paintLlm = () => {
         llmBox.replaceChildren();
+        if (llm.source === 'profile') {
+            let profiles = [];
+            try { profiles = ctx.ConnectionManagerRequestService.getSupportedProfiles(); } catch { /* 连接配置扩展被关了 */ }
+            if (!profiles.length) return llmBox.append(el('div', 'sv-hint', '酒馆里还没有能用的连接配置：到 API 连接页顶部的「连接配置」建一个，或者那个扩展被关了'));
+            if (!profiles.some((item) => item.id === llm.profile)) llm.profile = profiles[0].id;
+            return llmBox.append(field('连接配置', '用这个配置连的模型来分析，参数跟它的预设走', select(profiles.map((item) => [item.id, item.name || item.id]), llm.profile, (v) => { llm.profile = v; ctx.saveSettingsDebounced(); })));
+        }
         if (llm.source !== 'custom') return;
         const models = el('select', 'sv-select');
         const fill = () => {
@@ -498,11 +541,12 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
                         switchFor('skipAction', '不读星号里的动作描写'),
                         switchFor('narrateInCast', '角色配音也读旁白', '叙述部分用旁白声读'),
                         switchFor('userLines', '也读你自己扮演角色的台词')),
-                    card('语速', '', field('播放速度', '直接变速，不用重新合成',
-                        range(settings.speed, { min: 0.5, max: 2, step: 0.05, format: (v) => `${v.toFixed(2)}x` }, (v) => save('speed', v)))),
+                    card('语速和音量', '', field('播放速度', '直接变速，不用重新合成',
+                        range(settings.speed, { min: 0.5, max: 2, step: 0.05, format: (v) => `${v.toFixed(2)}x` }, (v) => save('speed', v))),
+                        field('音量', '', range(settings.volume ?? 1, { min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` }, (v) => save('volume', v)))),
                     card('角色配音的分析', '每条回复多一次模型调用，结果存在消息里，文字没变就不会再问',
                         switchFor('autoAnalyze', '回复结束就自动分析'),
-                        field('分析用的模型', '', select([['current', '酒馆当前连接的模型'], ['custom', '自定义 OpenAI 兼容接口']], llm.source, (v) => { llm.source = v; ctx.saveSettingsDebounced(); paintLlm(); })),
+                        field('分析用的模型', '', select([['current', '酒馆当前连接的模型'], ['profile', '酒馆的某个连接配置'], ['custom', '自定义 OpenAI 兼容接口']], llm.source, (v) => { llm.source = v; ctx.saveSettingsDebounced(); paintLlm(); })),
                         llmBox),
                 );
             },
@@ -522,7 +566,7 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
                         onRefresh: paintNarrator,
                     }));
                     paintNarrator();
-                    content.append(card('', '', field('提供商', '换了提供商，人物的声音要重新选', select(Object.values(providers).map((item) => [item.id, item.label]), p.id, (v) => { save('provider', v); paint(); }))));
+                    content.append(card('', '', field('提供商', '每家的默认声音和配音表分开记着，换回来还在', select(Object.values(providers).map((item) => [item.id, item.label]), p.id, (v) => { switchProvider(v); paint(); }))));
                     if (p.id === 'fish') {
                         // 合成不走官方时，参考音频、账号音色、建模型这几样还得直连官方，要一把官方密钥
                         const official = card('Fish 官方密钥', '合成地址不是官方时才用得上：参考音频、账号里的音色、建成 Fish 音色只有官方接口有，这几样会用它直连官方；不填就用不了这几样',
@@ -612,7 +656,7 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
                 addRow.append(name, button('添加', () => add(name.value.trim()), { iconName: 'fa-plus' }),
                     button(`添加${NARRATOR}`, () => add(NARRATOR), { title: '给这张卡单独指定朗读和旁白的声音' }));
                 content.append(card(`配音表 · ${cardName()}`,
-                    `按角色卡存。没有「${NARRATOR}」这一行时，朗读和旁白用 Fish Audio 页的默认声音；没配声音的人物也用默认声音。声音旁边的语言：选了别的语言，角色配音分析时会把这个人的台词翻译过去再念，换语言后下次播放会自动重新分析`, list, addRow));
+                    `按角色卡存。没有「${NARRATOR}」这一行时，朗读和旁白用「语音接口」页的默认声音；没配声音的人物也用默认声音。声音旁边的语言：选了别的语言，角色配音分析时会把这个人的台词翻译过去再念，换语言后下次播放会自动重新分析`, list, addRow));
             },
         },
         {
@@ -639,7 +683,9 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
                 };
                 search.addEventListener('input', paint);
                 listAudio().then((all) => { rows = all; paint(); });
-                content.append(card('语音缓存', '合成过的音频存在这个浏览器里，同一句重听不再花钱。能试听、下载成 mp3、删单条', stats, search, list,
+                content.append(card('语音缓存', '合成过的音频存在这个浏览器里，同一句重听不再花钱。能试听、下载成 mp3、删单条',
+                    field('缓存上限', '每放完一轮检查一次，超过就从最旧的开始删', select([['100', '100 MB'], ['300', '300 MB'], ['1000', '1 GB'], ['0', '不限']], String(settings.cacheLimit ?? 300), (v) => save('cacheLimit', Number(v)))),
+                    stats, search, list,
                     button('清空全部', async () => {
                         if (!await confirmPopup('清空全部缓存？之后重听都要重新合成。')) return;
                         await clearAudio();

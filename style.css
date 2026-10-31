@@ -17,7 +17,8 @@
 .st-voice i.fa-solid { line-height: 1; }
 
 /* 正文里正在念的句子，和能点的句子 */
-::highlight(st-voice-line) { background-color: color-mix(in srgb, var(--SmartThemeQuoteColor, #e0a04a) 30%, transparent); }
+::highlight(st-voice-line) { background-color: color-mix(in srgb, var(--SmartThemeQuoteColor, #e0a04a) 18%, transparent); }
+::highlight(st-voice-word) { background-color: color-mix(in srgb, var(--SmartThemeQuoteColor, #e0a04a) 45%, transparent); }
 ::highlight(st-voice-marks) { text-decoration: underline dashed color-mix(in srgb, var(--SmartThemeQuoteColor, #e0a04a) 75%, transparent); text-underline-offset: 3px; }
 #st_voice_pop {
     position: fixed;

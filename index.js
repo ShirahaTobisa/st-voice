@@ -7,7 +7,7 @@ import elevenlabs from './src/providers/elevenlabs.js';
 import azure from './src/providers/azure.js';
 import google from './src/providers/google.js';
 import edge from './src/providers/edge.js';
-import { extractLines, highlight, clearHighlight, setMarks, hash } from './src/text.js';
+import { extractLines, highlight, clearHighlight, highlightProgress, setMarks, hash } from './src/text.js';
 import { createPlayer } from './src/player.js';
 import { NARRATOR, KIND_LABEL, langName, requestLabels } from './src/analyze.js';
 import { openSettings } from './src/settings.js';
@@ -22,8 +22,8 @@ const providerDefaults = () => Object.fromEntries(Object.values(PROVIDERS).map((
 const DEFAULTS = {
     enabled: true, widget: true, mode: 'read', autoPlay: false, autoAnalyze: false, dblclick: false,
     quotesOnly: false, skipParen: true, skipAction: false, narrateInCast: false, userLines: false,
-    speed: 1, provider: 'fish', ...providerDefaults(), narrator: { id: '', title: '' }, cast: {}, library: [], fishLangs: {},
-    llm: { source: 'current', url: '', key: '', model: '', models: [] },
+    speed: 1, volume: 1, cacheLimit: 300, provider: 'fish', ...providerDefaults(), narrator: { id: '', title: '' }, cast: {}, library: [], fishLangs: {},
+    llm: { source: 'current', url: '', key: '', model: '', models: [], profile: '' },
 };
 const BUTTONS = '<div title="播放语音" class="mes_button st_voice_play fa-solid fa-volume-high"></div><div title="语音预览（角色配音模式下会先分析）" class="mes_button st_voice_preview fa-solid fa-list-check"></div>';
 
@@ -62,8 +62,10 @@ const player = createPlayer({
         highlight(items[i].range);
         widget.setState({ state: 'playing', speaker: items[i].speaker, text: items[i].text, index: i, total: items.length });
     },
+    onProgress: (i, ratio) => items[i] && highlightProgress(items[i].parts, ratio),
     onState: (state, detail) => {
-        if (state === 'loading') widget.setState({ state: 'loading', index: detail, total: items.length });
+        if (state === 'loading') widget.setState({ state: 'loading', speaker: '', text: '', index: detail, total: items.length });
+        if (state === 'paused' || state === 'playing') widget.setState({ state });
         if (state === 'error') toastr.error(detail, '语音');
         if (state === 'idle') stop();
     },
@@ -147,7 +149,7 @@ function itemsOf(message, lines, labels) {
     const user = context().name1;
     // 有译文的句子合成译文，屏幕上高亮的还是原文（range 没变）
     return indexed.map((line) => ({ ...line, speaker: labels[line.index][0], tone: labels[line.index][1], translation: labels[line.index][2] || '' }))
-        .filter((line) => keep(line) && (line.speaker !== NARRATOR || s.narrateInCast) && (line.speaker !== user || s.userLines))
+        .filter((line) => keep(line) && (line.speaker !== NARRATOR || s.narrateInCast) && (line.speaker !== user || s.userLines || message.is_user))
         .map((line) => withVoice({ ...line, original: line.text, text: line.translation || line.text, tone: line.speaker === NARRATOR ? '' : line.tone }, voiceFor(line.speaker)));
 }
 
@@ -177,7 +179,7 @@ async function play(messageId, { from = 0, only = false } = {}) {
             return toastr.warning(labels ? '这条消息里没有人物台词' : '按现在的设置没有能读的内容', '语音');
         }
         refreshMarks();
-        await player.play(items, s.speed);
+        await player.play(items, { rate: s.speed, volume: s.volume, cacheLimit: s.cacheLimit * 1048576 });
     } catch (error) {
         stop();
         fail(error.message);
@@ -354,8 +356,31 @@ const applyEnabled = () => {
     refreshMarks();
 };
 const openSettingsWindow = () => openSettings(settings(), PROVIDERS, {
-    cardKey, cardName, onChange: (key) => { if (['widget', 'enabled', 'mode', 'provider'].includes(key)) applyEnabled(); },
+    cardKey, cardName,
+    onChange: (key, value) => {
+        if (['widget', 'enabled', 'mode', 'provider'].includes(key)) applyEnabled();
+        if (key === 'volume') player.setVolume(value);
+        if (key === 'speed') player.setRate(value);
+    },
 });
+
+// 斜杠命令：/voice-play [消息编号]、/voice-stop、/voice-mode read|cast，给快速回复和脚本用
+function addSlashCommands() {
+    const { SlashCommandParser, SlashCommand, SlashCommandArgument, ARGUMENT_TYPE } = context();
+    if (!SlashCommandParser?.addCommandObject) return;
+    const add = (name, helpString, callback, unnamedArgumentList = []) => SlashCommandParser.addCommandObject(SlashCommand.fromProps({ name, helpString, callback, unnamedArgumentList, returns: '' }));
+    add('voice-play', '酒馆语音：播放一条消息，不填编号就是最新回复。例：<code>/voice-play</code>、<code>/voice-play 12</code>',
+        (_args, value) => { play(String(value ?? '').trim() === '' ? lastReply() : Number(value)); return ''; },
+        [SlashCommandArgument.fromProps({ description: '消息编号', typeList: [ARGUMENT_TYPE.NUMBER], isRequired: false })]);
+    add('voice-stop', '酒馆语音：停止播放', () => { stop(); return ''; });
+    add('voice-mode', '酒馆语音：切换模式，read 朗读、cast 角色配音；不带参数返回当前模式',
+        (_args, value) => {
+            const mode = String(value ?? '').trim();
+            if (['read', 'cast'].includes(mode)) { settings().mode = mode; context().saveSettingsDebounced(); widget.refresh(); refreshMarks(); }
+            return settings().mode;
+        },
+        [SlashCommandArgument.fromProps({ description: 'read 或 cast', typeList: [ARGUMENT_TYPE.STRING], isRequired: false, enumList: ['read', 'cast'] })]);
+}
 
 // 入口放在左下角 ≡ 菜单里（和智绘姬一样），不占扩展面板
 function addMenuEntry() {
@@ -382,12 +407,14 @@ jQuery(async () => {
         settings,
         onPlayLatest: () => play(lastReply()),
         onStop: stop,
+        onPause: () => (player.paused ? player.resume() : player.pause()),
         onAnalyze: analyzeLatest,
         onPreview: () => preview(lastReply()),
         onSettings: openSettingsWindow,
         onMode: (mode) => { settings().mode = mode; ctx.saveSettingsDebounced(); refreshMarks(); },
     });
     addMenuEntry();
+    addSlashCommands();
     applyEnabled();
 
     $('#message_template .extraMesButtons, #chat .extraMesButtons').prepend(BUTTONS);

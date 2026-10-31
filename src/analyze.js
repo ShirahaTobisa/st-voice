@@ -54,11 +54,11 @@ export function parseLabels(text, count) {
     return labels;
 }
 
-// llm.source 是 current 走酒馆当前连接的模型；是 custom 就让酒馆后端转发到填的接口（和酒馆自己的「反向代理」一个路子，不用浏览器直连）
+// llm.source：current 走酒馆当前连接的模型；profile 用酒馆的某个连接配置；custom 让酒馆后端转发到填的接口（和酒馆自己的「反向代理」一个路子，不用浏览器直连）
 export async function requestLabels(lines, info, llm) {
     const context = SillyTavern.getContext();
     const prompt = buildPrompt(lines, info);
-    log('分析', `发给模型 ${lines.length} 行（${llm.source === 'custom' ? llm.model : '酒馆当前连接'}）`, `[system]\n${SYSTEM}\n\n[user]\n${prompt}`);
+    log('分析', `发给模型 ${lines.length} 行（${{ custom: llm.model, profile: '连接配置' }[llm.source] || '酒馆当前连接'}）`, `[system]\n${SYSTEM}\n\n[user]\n${prompt}`);
     let text;
     let reasoning = '';
     if (llm.source === 'custom') {
@@ -72,6 +72,12 @@ export async function requestLabels(lines, info, llm) {
             reverse_proxy: llm.url,
             proxy_password: llm.key,
         }, {}, true);
+        text = result?.content || '';
+        reasoning = result?.reasoning || '';
+    } else if (llm.source === 'profile') {
+        if (!llm.profile) throw new Error('先在设置里选一个连接配置');
+        // 不传 max_tokens，由那个配置的预设和接口自己定
+        const result = await context.ConnectionManagerRequestService.sendRequest(llm.profile, [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt }], undefined, { stream: false });
         text = result?.content || '';
         reasoning = result?.reasoning || '';
     } else {

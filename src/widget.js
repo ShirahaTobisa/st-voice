@@ -2,9 +2,9 @@
 import { el, icon, button } from './ui.js';
 
 const STORE = 'st_voice_ball';
-const IDLE_TEXT = { idle: '点消息上的喇叭，或下面的按钮播放最新回复', loading: '合成中…', analyzing: '分析中…' };
+const IDLE_TEXT = { idle: '点消息上的喇叭，或下面的按钮播放最新回复', loading: '合成中…', analyzing: '分析中…', paused: '已暂停' };
 
-export function createWidget({ settings, onPlayLatest, onStop, onAnalyze, onPreview, onSettings, onMode }) {
+export function createWidget({ settings, onPlayLatest, onStop, onPause, onAnalyze, onPreview, onSettings, onMode }) {
     const ball = el('div', 'st-voice');
     ball.id = 'st_voice_ball';
     ball.append(icon('fa-headphones'));
@@ -33,11 +33,12 @@ export function createWidget({ settings, onPlayLatest, onStop, onAnalyze, onPrev
     const fill = el('div');
     progress.append(fill);
     const playButton = button('播放最新回复', onPlayLatest, { kind: 'sv-primary', iconName: 'fa-play' });
-    const stopButton = button('停止', onStop, { kind: 'sv-primary', iconName: 'fa-stop' });
+    const pauseButton = button('暂停', onPause, { kind: 'sv-primary', iconName: 'fa-pause' });
+    const stopButton = button('停止', onStop, { iconName: 'fa-stop' });
     // 角色配音模式才有「分析」：重新分析最新回复，然后打开预览看结果
     const analyzeButton = button('分析', onAnalyze, { iconName: 'fa-wand-magic-sparkles', title: '重新分析最新回复是谁说的、什么语气' });
     const controls = el('div', 'sv-panel-controls');
-    controls.append(playButton, stopButton, analyzeButton, button('预览', onPreview, { iconName: 'fa-list-check' }));
+    controls.append(playButton, pauseButton, stopButton, analyzeButton, button('预览', onPreview, { iconName: 'fa-list-check' }));
     const body = el('div', 'sv-panel-body');
     body.append(now, progress, controls);
     panel.append(header, body);
@@ -89,7 +90,11 @@ export function createWidget({ settings, onPlayLatest, onStop, onAnalyze, onPrev
         drag = null;
     });
 
-    function setState({ state = 'idle', speaker = '', text = '', index = 0, total = 0 } = {}) {
+    // 只给了 state（暂停、继续）时沿用上一句的信息；回到 idle 就清空
+    let last = {};
+    function setState(next = {}) {
+        last = !next.state || next.state === 'idle' ? {} : { ...last, ...next };
+        const { state = 'idle', speaker = '', text = '', index = 0, total = 0 } = last;
         ball.classList.toggle('playing', state === 'playing');
         ball.classList.toggle('loading', state === 'loading' || state === 'analyzing');
         now.replaceChildren();
@@ -99,11 +104,14 @@ export function createWidget({ settings, onPlayLatest, onStop, onAnalyze, onPrev
         fill.style.width = total ? `${((index + 1) / total) * 100}%` : '0';
         playButton.hidden = state !== 'idle';
         stopButton.hidden = state === 'idle';
+        pauseButton.hidden = !['playing', 'loading', 'paused'].includes(state);
+        pauseButton.replaceChildren(icon(state === 'paused' ? 'fa-play' : 'fa-pause'), el('span', '', state === 'paused' ? '继续' : '暂停'));
     }
     function refresh() {
         const on = settings().enabled && settings().widget;
         ball.hidden = !on;
         if (!on) panel.hidden = true;
+        paintSeg();
     }
     setState();
     refresh();
