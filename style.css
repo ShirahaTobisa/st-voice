@@ -13,7 +13,8 @@
     line-height: 1.45;
     text-align: left;
 }
-.st-voice [hidden] { display: none !important; }
+/* hidden 属性要压过下面给球和面板写的 display，不然在没有全局 [hidden] 规则的酒馆版本上面板会一直露着 */
+.st-voice[hidden], .st-voice [hidden] { display: none !important; }
 .st-voice i.fa-solid { line-height: 1; }
 
 /* 正文里正在念的句子，和能点的句子 */

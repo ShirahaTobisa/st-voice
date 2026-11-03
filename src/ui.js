@@ -82,6 +82,7 @@ export function openWindow({ title, iconName = 'fa-headphones', badge = '', smal
     header.append(closeButton);
     const body = el('div', 'sv-body');
     const content = el('div', 'sv-content');
+    let showPage = () => {};
     if (pages) {
         const nav = el('div', 'sv-nav');
         const show = (page) => {
@@ -102,6 +103,7 @@ export function openWindow({ title, iconName = 'fa-headphones', badge = '', smal
             nav.append(page.item);
         }
         body.append(nav);
+        showPage = (label) => { const page = pages.find((item) => item.label === label); if (page) show(page); };
         show(pages[0]);
     }
     body.append(content);
@@ -126,5 +128,5 @@ export function openWindow({ title, iconName = 'fa-headphones', badge = '', smal
         closeButton.addEventListener('click', () => close(null));
         overlay.addEventListener('click', (event) => event.target === overlay && close(null));
     });
-    return { content, close: (value) => close(value), closed };
+    return { content, close: (value) => close(value), closed, showPage };
 }

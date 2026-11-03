@@ -4,7 +4,7 @@ import { el, icon, button } from './ui.js';
 const STORE = 'st_voice_ball';
 const IDLE_TEXT = { idle: '点消息上的喇叭，或下面的按钮播放最新回复', loading: '合成中…', analyzing: '分析中…', paused: '已暂停' };
 
-export function createWidget({ settings, onPlayLatest, onStop, onPause, onAnalyze, onPreview, onSettings, onMode }) {
+export function createWidget({ settings, onPlayLatest, onStop, onPause, onNext, onAnalyze, onPreview, onSettings, onMode }) {
     const ball = el('div', 'st-voice');
     ball.id = 'st_voice_ball';
     ball.append(icon('fa-headphones'));
@@ -34,27 +34,36 @@ export function createWidget({ settings, onPlayLatest, onStop, onPause, onAnalyz
     progress.append(fill);
     const playButton = button('播放最新回复', onPlayLatest, { kind: 'sv-primary', iconName: 'fa-play' });
     const pauseButton = button('暂停', onPause, { kind: 'sv-primary', iconName: 'fa-pause' });
+    const nextButton = button('', onNext, { kind: 'sv-icon', iconName: 'fa-forward-step', title: '跳过这句' });
     const stopButton = button('停止', onStop, { iconName: 'fa-stop' });
     // 角色配音模式才有「分析」：重新分析最新回复，然后打开预览看结果
     const analyzeButton = button('分析', onAnalyze, { iconName: 'fa-wand-magic-sparkles', title: '重新分析最新回复是谁说的、什么语气' });
     const controls = el('div', 'sv-panel-controls');
-    controls.append(playButton, pauseButton, stopButton, analyzeButton, button('预览', onPreview, { iconName: 'fa-list-check' }));
+    controls.append(playButton, pauseButton, nextButton, stopButton, analyzeButton, button('预览', onPreview, { iconName: 'fa-list-check' }));
     const body = el('div', 'sv-panel-body');
     body.append(now, progress, controls);
     panel.append(header, body);
     document.body.append(ball, panel);
 
-    // 位置：限制在屏幕里，拖过就记住
-    const place = (x, y) => {
-        ball.style.left = `${Math.min(Math.max(4, x), innerWidth - ball.offsetWidth - 4)}px`;
-        ball.style.top = `${Math.min(Math.max(4, y), innerHeight - ball.offsetHeight - 4)}px`;
+    // 位置都按「屏幕上看到的坐标」算。酒馆 1.19 给 html 加了 transform，fixed 元素就不再相对视口定位，
+    // 所以写完坐标再量一次实际位置，差多少补多少
+    const pin = (node, x, y) => {
+        node.style.left = `${x}px`;
+        node.style.top = `${y}px`;
+        const rect = node.getBoundingClientRect();
+        if (Math.abs(rect.left - x) > 0.5 || Math.abs(rect.top - y) > 0.5) {
+            node.style.left = `${x - (rect.left - x)}px`;
+            node.style.top = `${y - (rect.top - y)}px`;
+        }
     };
+    const at = () => ball.getBoundingClientRect();
+    // 限制在屏幕里，拖过就记住
+    const place = (x, y) => pin(ball, Math.min(Math.max(4, x), innerWidth - ball.offsetWidth - 4), Math.min(Math.max(4, y), innerHeight - ball.offsetHeight - 4));
     const placePanel = () => {
-        const rect = ball.getBoundingClientRect();
+        const rect = at();
         const left = rect.left + rect.width / 2 > innerWidth / 2 ? rect.right - panel.offsetWidth : rect.left;
         const top = rect.top > panel.offsetHeight + 12 ? rect.top - panel.offsetHeight - 10 : rect.bottom + 10;
-        panel.style.left = `${Math.min(Math.max(8, left), innerWidth - panel.offsetWidth - 8)}px`;
-        panel.style.top = `${Math.min(Math.max(8, top), innerHeight - panel.offsetHeight - 8)}px`;
+        pin(panel, Math.min(Math.max(8, left), innerWidth - panel.offsetWidth - 8), Math.min(Math.max(8, top), innerHeight - panel.offsetHeight - 8));
     };
     const show = (open) => {
         panel.hidden = !open;
@@ -66,18 +75,18 @@ export function createWidget({ settings, onPlayLatest, onStop, onPause, onAnalyz
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem(STORE)); } catch { /* 没存过 */ }
     place(saved?.x ?? innerWidth - 64, saved?.y ?? innerHeight - 170);
-    addEventListener('resize', () => place(ball.offsetLeft, ball.offsetTop));
+    addEventListener('resize', () => { place(at().left, at().top); if (!panel.hidden) placePanel(); });
 
     let drag = null;
     ball.addEventListener('pointerdown', (event) => {
-        drag = { dx: event.clientX - ball.offsetLeft, dy: event.clientY - ball.offsetTop, moved: false };
+        drag = { dx: event.clientX - at().left, dy: event.clientY - at().top, moved: false };
         ball.setPointerCapture(event.pointerId);
     });
     ball.addEventListener('pointermove', (event) => {
         if (!drag) return;
         const x = event.clientX - drag.dx;
         const y = event.clientY - drag.dy;
-        if (Math.hypot(x - ball.offsetLeft, y - ball.offsetTop) > 4) drag.moved = true;
+        if (Math.hypot(x - at().left, y - at().top) > 4) drag.moved = true;
         if (drag.moved) {
             place(x, y);
             if (!panel.hidden) placePanel();
@@ -85,7 +94,7 @@ export function createWidget({ settings, onPlayLatest, onStop, onPause, onAnalyz
     });
     ball.addEventListener('pointerup', () => {
         if (!drag) return;
-        if (drag.moved) localStorage.setItem(STORE, JSON.stringify({ x: ball.offsetLeft, y: ball.offsetTop }));
+        if (drag.moved) localStorage.setItem(STORE, JSON.stringify({ x: at().left, y: at().top }));
         else show(panel.hidden);
         drag = null;
     });
@@ -105,6 +114,7 @@ export function createWidget({ settings, onPlayLatest, onStop, onPause, onAnalyz
         playButton.hidden = state !== 'idle';
         stopButton.hidden = state === 'idle';
         pauseButton.hidden = !['playing', 'loading', 'paused'].includes(state);
+        nextButton.hidden = state !== 'playing';
         pauseButton.replaceChildren(icon(state === 'paused' ? 'fa-play' : 'fa-pause'), el('span', '', state === 'paused' ? '继续' : '暂停'));
     }
     function refresh() {

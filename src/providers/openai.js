@@ -9,7 +9,7 @@ const auth = (settings) => {
 const fail = async (what, response) => {
     const detail = await response.json().then((data) => data?.error?.message || data?.message || data?.detail || '').catch(() => '');
     const text = typeof detail === 'string' ? detail : JSON.stringify(detail);
-    return new Error(`${what} ${response.status}：${HINTS[response.status] || text || '请求失败'}`);
+    return Object.assign(new Error(`${what} ${response.status}：${HINTS[response.status] || text || '请求失败'}`), { status: response.status });
 };
 
 // 常用的几家：选一个就把地址、模型、语气怎么传、声音名预设填好，密钥自己填。只放确定是这个格式的

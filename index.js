@@ -66,6 +66,7 @@ const player = createPlayer({
     onState: (state, detail) => {
         if (state === 'loading') widget.setState({ state: 'loading', speaker: '', text: '', index: detail, total: items.length });
         if (state === 'paused' || state === 'playing') widget.setState({ state });
+        if (state === 'skip') toastr.warning(`第 ${detail.index + 1} 句没合成出来，跳过了：${detail.message}`, '语音');
         if (state === 'error') toastr.error(detail, '语音');
         if (state === 'idle') stop();
     },
@@ -125,14 +126,30 @@ async function analyze(messageId, lines, force = false) {
     (message.extra ??= {}).st_voice = { hash: linesKey(lines), labels, targets };
     if (cardKey()) {
         const people = settings().cast[cardKey()] ??= [];
+        const added = [];
         for (const [speaker] of labels) {
-            if (speaker !== NARRATOR && speaker !== ctx.name1 && !people.some((p) => p.name === speaker)) people.push({ name: speaker, id: '', title: '' });
+            if (speaker !== NARRATOR && speaker !== ctx.name1 && !people.some((p) => p.name === speaker)) {
+                people.push({ name: speaker, id: '', title: '' });
+                added.push(speaker);
+            }
         }
         ctx.saveSettingsDebounced();
+        remindMissing(added);
     }
     await ctx.saveChat();
     refreshMarks();
     return labels;
+}
+
+// 这次分析新冒出来的人物还没有声音：提醒一次，点提示直接打开配音表、展开那个人的选声音（Fish 落在克隆页，名字预填好）
+let reminded = '';
+function remindMissing(names) {
+    const key = `${cardKey()}|${names.join('|')}`;
+    if (!names.length || key === reminded) return;
+    reminded = key;
+    toastr.info(`${names.join('、')} 还没有自己的声音，先用默认声音念。点这里去配音`, '语音', {
+        timeOut: 12000, extendedTimeOut: 5000, onclick: () => openSettingsWindow({ page: '配音表', person: names[0] }),
+    });
 }
 
 // 按设置挑出要读的句子，配上声音和语气；index 是句子在正文里的序号，点句播放用
@@ -355,8 +372,8 @@ const applyEnabled = () => {
     widget.refresh();
     refreshMarks();
 };
-const openSettingsWindow = () => openSettings(settings(), PROVIDERS, {
-    cardKey, cardName,
+const openSettingsWindow = (focus = null) => openSettings(settings(), PROVIDERS, {
+    cardKey, cardName, focus,
     onChange: (key, value) => {
         if (['widget', 'enabled', 'mode', 'provider'].includes(key)) applyEnabled();
         if (key === 'volume') player.setVolume(value);
@@ -408,9 +425,10 @@ jQuery(async () => {
         onPlayLatest: () => play(lastReply()),
         onStop: stop,
         onPause: () => (player.paused ? player.resume() : player.pause()),
+        onNext: () => player.next(),
         onAnalyze: analyzeLatest,
         onPreview: () => preview(lastReply()),
-        onSettings: openSettingsWindow,
+        onSettings: () => openSettingsWindow(),
         onMode: (mode) => { settings().mode = mode; ctx.saveSettingsDebounced(); refreshMarks(); },
     });
     addMenuEntry();

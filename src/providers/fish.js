@@ -34,7 +34,7 @@ const officialAuth = (settings, what) => bearer(officialKey(settings), `${what}�
 const fail = async (what, response) => {
     const detail = await response.json().then((data) => data?.error?.message || data?.message || data?.detail || '').catch(() => '');
     const text = typeof detail === 'string' ? detail : JSON.stringify(detail);
-    return new Error(`${what} ${response.status}：${MESSAGES[text] || HINTS[response.status] || text || '请求失败'}`);
+    return Object.assign(new Error(`${what} ${response.status}：${MESSAGES[text] || HINTS[response.status] || text || '请求失败'}`), { status: response.status });
 };
 const toVoice = (item) => ({
     id: item._id,

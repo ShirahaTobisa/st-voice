@@ -162,10 +162,10 @@ function fishVoiceList(provider, settings, { onPick } = {}) {
 }
 
 // 克隆新音色的表单：名字、音频文件、文字稿，「用参考音频」或「建成 Fish 音色」；做好后把声音交给 onDone
-function cloneForm(provider, settings, { onDone }) {
+function cloneForm(provider, settings, { onDone, title: initialTitle = '' }) {
     const providerSettings = settings[settings.provider];
     const form = el('div');
-    const title = input('', { placeholder: '给音色起个名字' });
+    const title = input(initialTitle, { placeholder: '给音色起个名字' });
     const files = Object.assign(el('input'), { type: 'file', accept: 'audio/*', multiple: true, hidden: true });
     const chosen = el('span', 'sv-hint', '还没选文件');
     files.addEventListener('change', () => { chosen.textContent = [...files.files].map((file) => file.name).join('、') || '还没选文件'; });
@@ -365,7 +365,8 @@ function fieldsCard(provider, own, saveOwn) {
 }
 
 // 挑声音，三个来源：公共声音库搜索、我的音色（参考音频 + Fish 账号里克隆的）、用音频文件克隆新音色。选中交给 onPick，库有变动叫 onRefresh
-function voicePicker(provider, settings, { onPick, onRefresh }) {
+// startClone 给了名字就直接落在「克隆新音色」页、名字预填好（新人物提醒跳过来用）
+function voicePicker(provider, settings, { onPick, onRefresh, startClone = '' }) {
     const pick = (voice) => onPick({ ...voice, provider: provider.id });
     if (provider.id !== 'fish') return (provider.listVoices ? nativePicker : namePicker)(provider, settings[provider.id], pick);
     const box = el('div', 'sv-picker');
@@ -420,30 +421,37 @@ function voicePicker(provider, settings, { onPick, onRefresh }) {
 
     addPane('声音库', library, () => { if (!results.childElementCount) load(1); });
     addPane('我的音色', mine, () => { refs.paint(); fishes.paint(); });
-    addPane('克隆新音色', cloneForm(provider, settings, { onDone: pick }));
+    addPane('克隆新音色', cloneForm(provider, settings, { onDone: pick, title: startClone }));
     box.prepend(seg);
-    show(panes[0]);
+    show(startClone ? panes[2] : panes[0]);
     return box;
 }
 
 // 一行「名字 + 当前声音 + 语言 + 试听 / 换声音 / 删除」，点换声音在下面展开选声音
-function voiceRow(provider, settings, name, voice, { onPick, onRemove, onRefresh, onLang }) {
+// open 为真就一打开页面先把这一行的选声音展开（Fish 直接落在克隆页，名字预填），并滚到这一行
+function voiceRow(provider, settings, name, voice, { onPick, onRemove, onRefresh, onLang, open = false }) {
     const picker = el('div');
     picker.hidden = true;
     const current = voice?.ref ? `参考音频 · ${voice.title}` : voice?.title || '用默认声音';
     const actions = [];
     if (voice && (voice.id || voice.ref) && onLang) actions.push(langSelect(voice.lang, onLang));
-    actions.push(voiceButton(provider, settings[provider.id], voice), button('换声音', () => {
+    const expand = (startClone = '') => {
         picker.hidden = !picker.hidden;
-        if (!picker.childElementCount) picker.append(voicePicker(provider, settings, { onPick, onRefresh }));
-    }, { iconName: 'fa-shuffle' }));
+        if (!picker.childElementCount) picker.append(voicePicker(provider, settings, { onPick, onRefresh, startClone }));
+    };
+    actions.push(voiceButton(provider, settings[provider.id], voice), button('换声音', () => expand(), { iconName: 'fa-shuffle' }));
     if (onRemove) actions.push(button('', onRemove, { kind: 'sv-icon', iconName: 'fa-trash', title: '删除' }));
     const wrap = el('div');
     wrap.append(row(name, name, current, ...actions), picker);
+    if (open) {
+        expand(name);
+        setTimeout(() => wrap.scrollIntoView({ block: 'start', behavior: 'smooth' }), 50);
+    }
     return wrap;
 }
 
-export async function openSettings(settings, providers, { cardKey, cardName, onChange }) {
+// focus：{ page, person } 打开时直接切到某页、展开某个人物的选声音（新人物提醒跳过来用）
+export async function openSettings(settings, providers, { cardKey, cardName, onChange, focus = null }) {
     const ctx = context();
     const provider = () => providers[settings.provider];
     const save = (key, value) => {
@@ -635,11 +643,14 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
                 const list = el('div');
                 const persist = () => { settings.cast[key] = people; ctx.saveSettingsDebounced(); paintList(); };
                 const paintList = () => {
+                    const open = focus?.person;
+                    if (focus) focus.person = '';
                     list.replaceChildren(...people.map((person) => voiceRow(provider(), settings, person.name, person, {
                         onPick: (voice) => { Object.assign(person, { id: '', title: '', sample: '', ref: null, lang: '' }, voice); persist(); },
                         onLang: (lang) => { person.lang = lang; ctx.saveSettingsDebounced(); },
                         onRemove: () => { people.splice(people.indexOf(person), 1); persist(); },
                         onRefresh: paintList,
+                        open: person.name === open,
                     })));
                     if (!people.length) list.append(el('div', 'sv-empty', '还没有人物。角色配音分析过一次后会自动加进来，也可以在下面手动加'));
                 };
@@ -722,6 +733,7 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
         },
     ];
     const win = openWindow({ title: '酒馆语音', badge: version, pages });
+    if (focus?.page) win.showPage(focus.page);
     await win.closed;
     sampleAudio.pause();
 }
