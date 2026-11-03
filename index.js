@@ -7,13 +7,14 @@ import elevenlabs from './src/providers/elevenlabs.js';
 import azure from './src/providers/azure.js';
 import google from './src/providers/google.js';
 import edge from './src/providers/edge.js';
-import { extractLines, highlight, clearHighlight, highlightProgress, setMarks, hash } from './src/text.js';
+import { extractLines, highlight, clearHighlight, highlightProgress, revealRange, setMarks, hash } from './src/text.js';
+import { mergeToWav } from './src/audio.js';
 import { createPlayer } from './src/player.js';
 import { NARRATOR, KIND_LABEL, langName, requestLabels } from './src/analyze.js';
 import { openSettings } from './src/settings.js';
 import { createWidget } from './src/widget.js';
 import { el, button, input, openWindow } from './src/ui.js';
-import { log } from './src/log.js';
+import { log, download } from './src/log.js';
 
 const MODULE = 'st_voice';
 const PROVIDERS = { fish, openai, minimax, volcengine, elevenlabs, azure, google, edge };
@@ -22,7 +23,7 @@ const providerDefaults = () => Object.fromEntries(Object.values(PROVIDERS).map((
 const DEFAULTS = {
     enabled: true, widget: true, mode: 'read', autoPlay: false, autoAnalyze: false, dblclick: false,
     quotesOnly: false, skipParen: true, skipAction: false, narrateInCast: false, userLines: false,
-    speed: 1, volume: 1, cacheLimit: 300, provider: 'fish', ...providerDefaults(), narrator: { id: '', title: '' }, cast: {}, library: [], fishLangs: {},
+    speed: 1, volume: 1, cacheLimit: 300, follow: true, continuous: false, hotkeys: true, pronunciations: [], provider: 'fish', ...providerDefaults(), narrator: { id: '', title: '' }, cast: {}, library: [], fishLangs: {},
     llm: { source: 'current', url: '', key: '', model: '', models: [], profile: '' },
 };
 const BUTTONS = '<div title="播放语音" class="mes_button st_voice_play fa-solid fa-volume-high"></div><div title="语音预览（角色配音模式下会先分析）" class="mes_button st_voice_preview fa-solid fa-list-check"></div>';
@@ -60,6 +61,7 @@ const player = createPlayer({
     synthesize: (item, signal) => provider().synthesize(item, settings()[settings().provider], signal),
     onLine: (i) => {
         highlight(items[i].range);
+        if (settings().follow) revealRange(items[i].range);
         widget.setState({ state: 'playing', speaker: items[i].speaker, text: items[i].text, index: i, total: items.length });
     },
     onProgress: (i, ratio) => items[i] && highlightProgress(items[i].parts, ratio),
@@ -68,7 +70,7 @@ const player = createPlayer({
         if (state === 'paused' || state === 'playing') widget.setState({ state });
         if (state === 'skip') toastr.warning(`第 ${detail.index + 1} 句没合成出来，跳过了：${detail.message}`, '语音');
         if (state === 'error') toastr.error(detail, '语音');
-        if (state === 'idle') stop();
+        if (state === 'idle') finish();
     },
 });
 
@@ -77,14 +79,21 @@ function refreshButtons() {
     if (playingId != null) $(`#chat .mes[mesid="${playingId}"] .st_voice_play`).removeClass('fa-volume-high').addClass('fa-stop');
 }
 
-function stop() {
-    token += 1;
+// 放完了或被停了：清掉高亮和状态。stop 还会掐掉播放器、让正在进行的分析作废
+function finish() {
     playingId = null;
-    player.stop();
     clearHighlight();
     widget.setState();
     refreshButtons();
 }
+function stop() {
+    token += 1;
+    player.stop();
+    finish();
+}
+
+// 读音替换：念之前把表里左边的换成右边的，屏幕上还是原文
+const pronounce = (text) => settings().pronunciations.reduce((result, { from, to }) => (from ? result.split(from).join(to || '') : result), text);
 
 function castNames() {
     const ctx = context();
@@ -157,7 +166,7 @@ function itemsOf(message, lines, labels) {
     const s = settings();
     const key = `${s.provider}|${s[s.provider].model || ''}`;
     const keep = (line) => (line.kind !== 'status' || (line.speaker && line.speaker !== NARRATOR)) && !(s.skipParen && line.kind === 'paren') && !(s.skipAction && line.kind === 'action');
-    const withVoice = (line, voice) => ({ ...line, key, voice, voiceKey: voiceKey(voice) });
+    const withVoice = (line, voice) => ({ ...line, key, voice, voiceKey: voiceKey(voice), speech: pronounce(line.text) });
     const indexed = lines.map((line, index) => ({ ...line, index }));
     if (!labels) {
         const voice = voiceFor(message.name);
@@ -196,10 +205,37 @@ async function play(messageId, { from = 0, only = false } = {}) {
             return toastr.warning(labels ? '这条消息里没有人物台词' : '按现在的设置没有能读的内容', '语音');
         }
         refreshMarks();
-        await player.play(items, { rate: s.speed, volume: s.volume, cacheLimit: s.cacheLimit * 1048576 });
+        await player.play(items, { rate: s.speed, volume: s.volume, cacheLimit: s.cacheLimit * 1048576, album: cardName() });
+        // 自己放完的（不是被停的）且开了连播：接着读后面的回复
+        if (mine === token && s.continuous && !only) {
+            const after = context().chat.findIndex((m, i) => i > messageId && !m.is_user && !m.is_system);
+            if (after >= 0) return play(after);
+        }
     } catch (error) {
         stop();
         fail(error.message);
+    }
+}
+
+// 把这条消息要读的句子全部合成（有缓存的用缓存），拼成一个 wav 下载
+async function exportAudio(messageId) {
+    const message = context().chat[messageId];
+    const root = messageText(messageId);
+    if (!message || !root) return toastr.info('没有可以导出的回复', '语音');
+    const lines = extractLines(root);
+    if (!lines.length) return toastr.warning('这条消息没有能读的文字', '语音');
+    try {
+        const labels = settings().mode === 'cast' ? await analyze(messageId, lines) : null;
+        const list = itemsOf(message, lines, labels);
+        if (!list.length) return toastr.warning(labels ? '这条消息里没有人物台词' : '按现在的设置没有能读的内容', '语音');
+        const blobs = await player.fetchAll(list, (i) => widget.setState({ state: 'loading', speaker: '', text: `导出中，第 ${i + 1} / ${list.length} 句`, index: i, total: list.length }));
+        widget.setState({ state: 'loading', speaker: '', text: '拼接中…', index: list.length - 1, total: list.length });
+        download(await mergeToWav(blobs), `${cardName() || '语音'}-${messageId + 1}.wav`);
+        toastr.success(`导出好了，${list.length} 句`, '语音');
+    } catch (error) {
+        fail(error.message);
+    } finally {
+        if (playingId == null) widget.setState();
     }
 }
 
@@ -303,6 +339,7 @@ async function preview(messageId) {
     const rows = lines.map((line, i) => {
         if (line.kind === 'status') return null;
         const node = el('div', `sv-line${voiced.has(line.range) ? '' : ' sv-skipped'}`);
+        node.append(button('', () => win.close({ from: i }), { kind: 'sv-icon', iconName: 'fa-play', title: '从这句开始播放' }));
         if (isCast) node.append(input(labels[i][0], { list: 'st_voice_names', placeholder: '说话人' }), input(labels[i][1], { placeholder: '语气（英文）' }));
         else node.append(el('span', 'sv-kind', KIND_LABEL[line.kind]));
         const text = el('div', 'sv-line-text', line.text);
@@ -313,6 +350,7 @@ async function preview(messageId) {
     const hidden = rows.filter((node) => !node).length;
     const footer = [
         ...(isCast ? [button('重新分析', () => win.close('again'), { iconName: 'fa-rotate' })] : []),
+        button('导出音频', () => win.close('export'), { iconName: 'fa-download', title: '把要读的句子全部合成，拼成一个 wav 下载' }),
         button('播放', () => win.close('play'), { kind: 'sv-primary', iconName: 'fa-play' }),
         button('关闭', () => win.close(null)),
     ];
@@ -323,7 +361,8 @@ async function preview(messageId) {
         delete message.extra.st_voice;
         return preview(messageId);
     }
-    if (result !== 'play') return;
+    const from = result === 'play' ? 0 : result?.from;
+    if (from == null && result !== 'export') return;
     if (isCast) {
         message.extra.st_voice.labels = rows.map((node, i) => {
             if (!node) return labels[i];
@@ -333,7 +372,8 @@ async function preview(messageId) {
         await ctx.saveChat();
         refreshMarks();
     }
-    play(messageId);
+    if (result === 'export') return exportAudio(messageId);
+    play(messageId, { from });
 }
 
 // 面板上的「分析」：重新分析最新回复，分析完打开预览
@@ -390,6 +430,9 @@ function addSlashCommands() {
         (_args, value) => { play(String(value ?? '').trim() === '' ? lastReply() : Number(value)); return ''; },
         [SlashCommandArgument.fromProps({ description: '消息编号', typeList: [ARGUMENT_TYPE.NUMBER], isRequired: false })]);
     add('voice-stop', '酒馆语音：停止播放', () => { stop(); return ''; });
+    add('voice-export', '酒馆语音：把一条消息要读的句子全部合成、拼成一个 wav 下载，不填编号就是最新回复',
+        (_args, value) => { exportAudio(String(value ?? '').trim() === '' ? lastReply() : Number(value)); return ''; },
+        [SlashCommandArgument.fromProps({ description: '消息编号', typeList: [ARGUMENT_TYPE.NUMBER], isRequired: false })]);
     add('voice-mode', '酒馆语音：切换模式，read 朗读、cast 角色配音；不带参数返回当前模式',
         (_args, value) => {
             const mode = String(value ?? '').trim();
@@ -425,6 +468,7 @@ jQuery(async () => {
         onPlayLatest: () => play(lastReply()),
         onStop: stop,
         onPause: () => (player.paused ? player.resume() : player.pause()),
+        onPrev: () => player.prev(),
         onNext: () => player.next(),
         onAnalyze: analyzeLatest,
         onPreview: () => preview(lastReply()),
@@ -444,6 +488,17 @@ jQuery(async () => {
     $(document).on('click', '#chat .mes_text', function (event) { onTextClick(event, this.closest('.mes')); });
     document.addEventListener('click', (event) => { if (popover && !popover.contains(event.target) && !event.target.closest('#chat .mes_text')) closePopover(); });
     addEventListener('keydown', (event) => { if (event.key === 'Escape') closePopover(); });
+    // 快捷键都带 Alt，打字时也不会误触：Alt+P 播放 / 暂停，Alt+S 停止，Alt+[ 上一句，Alt+] 下一句
+    addEventListener('keydown', (event) => {
+        if (!event.altKey || event.ctrlKey || event.metaKey || !settings().enabled || !settings().hotkeys) return;
+        const actions = {
+            KeyP: () => (player.busy ? (player.paused ? player.resume() : player.pause()) : play(lastReply())),
+            KeyS: stop, BracketLeft: () => player.prev(), BracketRight: () => player.next(),
+        };
+        if (!actions[event.code]) return;
+        event.preventDefault();
+        actions[event.code]();
+    });
 
     const { eventSource, event_types } = ctx;
     eventSource.makeLast(event_types.CHARACTER_MESSAGE_RENDERED, onRendered);

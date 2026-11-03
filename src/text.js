@@ -93,6 +93,18 @@ export function extractLines(root, maxLength = 160) {
     return result;
 }
 
+// 正在念的句子不在屏幕里就滚过去（句子在 iframe 里时连外面一起滚）
+export function revealRange(range) {
+    try {
+        const rect = range.getBoundingClientRect();
+        const frame = range.startContainer.ownerDocument.defaultView?.frameElement;
+        const offset = frame ? frame.getBoundingClientRect().top : 0;
+        if (rect.top + offset >= 0 && rect.bottom + offset <= innerHeight) return;
+        const node = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer;
+        node?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } catch { /* 正文被重画了 */ }
+}
+
 // 高亮用 CSS 自定义高亮，不改正文。两种：正在念的句子（底色）、能点的句子（虚线）。句子在 iframe 里时要在那个窗口登记并补样式
 const MARKS = 'st-voice-marks';
 const WORD = 'st-voice-word';

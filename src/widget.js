@@ -4,7 +4,7 @@ import { el, icon, button } from './ui.js';
 const STORE = 'st_voice_ball';
 const IDLE_TEXT = { idle: '点消息上的喇叭，或下面的按钮播放最新回复', loading: '合成中…', analyzing: '分析中…', paused: '已暂停' };
 
-export function createWidget({ settings, onPlayLatest, onStop, onPause, onNext, onAnalyze, onPreview, onSettings, onMode }) {
+export function createWidget({ settings, onPlayLatest, onStop, onPause, onPrev, onNext, onAnalyze, onPreview, onSettings, onMode }) {
     const ball = el('div', 'st-voice');
     ball.id = 'st_voice_ball';
     ball.append(icon('fa-headphones'));
@@ -34,12 +34,13 @@ export function createWidget({ settings, onPlayLatest, onStop, onPause, onNext, 
     progress.append(fill);
     const playButton = button('播放最新回复', onPlayLatest, { kind: 'sv-primary', iconName: 'fa-play' });
     const pauseButton = button('暂停', onPause, { kind: 'sv-primary', iconName: 'fa-pause' });
-    const nextButton = button('', onNext, { kind: 'sv-icon', iconName: 'fa-forward-step', title: '跳过这句' });
+    const prevButton = button('', onPrev, { kind: 'sv-icon', iconName: 'fa-backward-step', title: '上一句（念过两秒以上就是重念这句）' });
+    const nextButton = button('', onNext, { kind: 'sv-icon', iconName: 'fa-forward-step', title: '下一句' });
     const stopButton = button('停止', onStop, { iconName: 'fa-stop' });
     // 角色配音模式才有「分析」：重新分析最新回复，然后打开预览看结果
     const analyzeButton = button('分析', onAnalyze, { iconName: 'fa-wand-magic-sparkles', title: '重新分析最新回复是谁说的、什么语气' });
     const controls = el('div', 'sv-panel-controls');
-    controls.append(playButton, pauseButton, nextButton, stopButton, analyzeButton, button('预览', onPreview, { iconName: 'fa-list-check' }));
+    controls.append(playButton, prevButton, pauseButton, nextButton, stopButton, analyzeButton, button('预览', onPreview, { iconName: 'fa-list-check' }));
     const body = el('div', 'sv-panel-body');
     body.append(now, progress, controls);
     panel.append(header, body);
@@ -114,7 +115,7 @@ export function createWidget({ settings, onPlayLatest, onStop, onPause, onNext, 
         playButton.hidden = state !== 'idle';
         stopButton.hidden = state === 'idle';
         pauseButton.hidden = !['playing', 'loading', 'paused'].includes(state);
-        nextButton.hidden = state !== 'playing';
+        prevButton.hidden = nextButton.hidden = !['playing', 'loading', 'paused'].includes(state);
         pauseButton.replaceChildren(icon(state === 'paused' ? 'fa-play' : 'fa-pause'), el('span', '', state === 'paused' ? '继续' : '暂停'));
     }
     function refresh() {

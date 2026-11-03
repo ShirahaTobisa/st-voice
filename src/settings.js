@@ -278,6 +278,29 @@ function modelPicker(provider, own, saveOwn) {
     return line;
 }
 
+// 读音替换表：左边原文、右边念法，改完就存；空的左边不算
+function pronunciationTable(settings) {
+    const box = el('div');
+    const list = el('div');
+    const save = () => context().saveSettingsDebounced();
+    const paint = () => {
+        list.replaceChildren(...settings.pronunciations.map((entry) => {
+            const line = el('div', 'sv-search');
+            line.append(
+                input(entry.from, { placeholder: '原文' }, (v) => { entry.from = v; save(); }),
+                el('span', 'sv-hint', '→'),
+                input(entry.to, { placeholder: '念成' }, (v) => { entry.to = v; save(); }),
+                button('', () => { settings.pronunciations.splice(settings.pronunciations.indexOf(entry), 1); save(); paint(); }, { kind: 'sv-icon', iconName: 'fa-trash', title: '删除' }),
+            );
+            return line;
+        }));
+        if (!settings.pronunciations.length) list.append(el('div', 'sv-empty', '还没有替换规则'));
+    };
+    paint();
+    box.append(list, button('加一条', () => { settings.pronunciations.push({ from: '', to: '' }); paint(); list.querySelector('.sv-search:last-child input')?.focus(); }, { iconName: 'fa-plus' }));
+    return box;
+}
+
 // 走酒馆后端的几家：这家接口给的声音列表（接口拉的或内置表），本地按名字、语言搜；有试听的带试听，给了 onPick 就能选用
 function voiceList(provider, own, { onPick } = {}) {
     const node = el('div');
@@ -542,6 +565,9 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
                     card('触发', '',
                         switchFor('autoPlay', '回复结束自动播放'),
                         switchFor('dblclick', '双击消息播放'),
+                        switchFor('continuous', '读完这条接着读后面的回复', '补长聊天记录用；从哪条开始播就一路读到最后一条'),
+                        switchFor('follow', '播放时跟着滚动到正在念的句子'),
+                        switchFor('hotkeys', '快捷键', 'Alt+P 播放 / 暂停，Alt+S 停止，Alt+[ 上一句，Alt+] 下一句'),
                         switchFor('widget', '显示悬浮球', '聊天页上的小圆球，能拖动，点开是播放面板')),
                     card('读什么', '',
                         switchFor('quotesOnly', '朗读模式只读引号里的对白'),
@@ -552,6 +578,7 @@ export async function openSettings(settings, providers, { cardKey, cardName, onC
                     card('语速和音量', '', field('播放速度', '直接变速，不用重新合成',
                         range(settings.speed, { min: 0.5, max: 2, step: 0.05, format: (v) => `${v.toFixed(2)}x` }, (v) => save('speed', v))),
                         field('音量', '', range(settings.volume ?? 1, { min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` }, (v) => save('volume', v)))),
+                    card('读音替换', '念之前把左边的换成右边的，只影响发音，屏幕上还是原文。人名、多音字、生僻字念错了就在这里纠正，比如「黍 → 蜀」「Dr. → 博士」', pronunciationTable(settings)),
                     card('角色配音的分析', '每条回复多一次模型调用，结果存在消息里，文字没变就不会再问',
                         switchFor('autoAnalyze', '回复结束就自动分析'),
                         field('分析用的模型', '', select([['current', '酒馆当前连接的模型'], ['profile', '酒馆的某个连接配置'], ['custom', '自定义 OpenAI 兼容接口']], llm.source, (v) => { llm.source = v; ctx.saveSettingsDebounced(); paintLlm(); })),
