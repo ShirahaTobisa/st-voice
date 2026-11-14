@@ -50,7 +50,7 @@ SillyTavern（酒馆）的第三方扩展，把 AI 回复读出来。两种模�
 
 1. 提供商选 **Fish Audio**，协议选 **兼容格式**。
 2. 接口地址填 `https://你的中转域名/v1`，或完整的 `/v1/audio/speech` 地址；密钥填 **New API 令牌**。
-3. 模型填该令牌可用的 Fish 模型名，以中转配置为准；声音选 Fish 声音库中的音色或填对应声音 ID，音频格式先用 MP3。
+3. 模型填该令牌可用的 Fish 模型名，以中转配置为准；声音从 Fish 声音库中选择，上游需要支持对应的音色 ID，音频格式先用 MP3。
 
 这里只保证请求格式对应 [New API 的语音合成接口](https://docs.newapi.pro/zh/docs/api/ai-model/audio/openai/createspeech)，还需中转已配置相应渠道、令牌有权限，并允许酒馆页面跨域访问。Fish 兼容模式只填域名会使用 `/compat/v1/audio/speech`，因此接标准 New API 时应保留上面的 `/v1`。
 
