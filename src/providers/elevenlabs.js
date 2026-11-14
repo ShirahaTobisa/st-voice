@@ -20,6 +20,7 @@ export default {
         }));
     },
     synthesize({ text, voice, tone }, settings, signal) {
+        if (!voice?.id) throw new Error('还没选 ElevenLabs 声音');
         const input = settings.model.startsWith('eleven_v3') && tone ? `[${tone}] ${text}` : text;
         return stAudio('/api/speech/elevenlabs/synthesize', {
             voiceId: voice?.id,

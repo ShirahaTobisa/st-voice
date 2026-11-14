@@ -1,4 +1,4 @@
-// MiniMax（海螺）语音：经酒馆后端 /api/minimax/generate-voice，密钥和 Group ID 存酒馆密钥库
+// MiniMax（海螺）语音：经酒馆后端 /api/minimax/generate-voice，密钥存酒馆密钥库
 import { stAudio } from '../st-api.js';
 
 const VOICES = [
@@ -17,7 +17,6 @@ export default {
     defaults: { apiHost: 'https://api.minimax.io', model: 'speech-02-hd' },
     secrets: [
         { key: 'api_key_minimax', label: 'API Key', hint: 'MiniMax 开放平台的接口密钥' },
-        { key: 'minimax_group_id', label: 'Group ID', hint: '开放平台账户信息里的 GroupId' },
     ],
     fields: [
         { key: 'apiHost', label: '接口地址', type: 'select', options: [['https://api.minimax.io', '国际 api.minimax.io'], ['https://api.minimaxi.chat', '国际 api.minimaxi.chat'], ['https://api.minimax.chat', '国内 api.minimax.chat']] },

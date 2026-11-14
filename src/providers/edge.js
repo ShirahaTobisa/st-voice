@@ -11,7 +11,7 @@ export default {
     voicesHint: '声音名，例如 zh-CN-XiaoxiaoNeural',
     toneNote: '传不了语气',
     async listVoices() {
-        const data = await stJson('/api/plugins/edge-tts/list', {}, '读取 Edge 声音');
+        const data = await stJson('/api/plugins/edge-tts/list', null, '读取 Edge 声音', 'GET');
         return data.map((voice) => ({
             id: voice.ShortName,
             title: voice.FriendlyName?.replace(/^Microsoft /, '').replace(/ Online \(Natural\)/, '') || voice.ShortName,
@@ -21,6 +21,6 @@ export default {
         })).sort((a, b) => (a.lang === 'zh' ? 0 : 1) - (b.lang === 'zh' ? 0 : 1));
     },
     synthesize({ text, voice }, settings, signal) {
-        return stAudio('/api/plugins/edge-tts/generate', { text, voice: voice?.id || 'zh-CN-XiaoxiaoNeural', rate: 0 }, 'Edge 语音', signal);
+        return stAudio('/api/plugins/edge-tts/generate', { text, voice: voice?.id || 'zh-CN-XiaoxiaoNeural' }, 'Edge 语音', signal);
     },
 };

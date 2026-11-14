@@ -1,30 +1,23 @@
 // 悬浮球 + 播放面板：球能拖动、位置记在本机；点开面板看正在念的句子、切模式、播放最新回复
-import { el, icon, button } from './ui.js';
+import { el, icon, button, segmented } from './ui.js';
 
 const STORE = 'st_voice_ball';
 const IDLE_TEXT = { idle: '点消息上的喇叭，或下面的按钮播放最新回复', loading: '合成中…', analyzing: '分析中…', paused: '已暂停' };
 
 export function createWidget({ settings, onPlayLatest, onStop, onPause, onPrev, onNext, onAnalyze, onPreview, onSettings, onMode }) {
-    const ball = el('div', 'st-voice');
-    ball.id = 'st_voice_ball';
+    // 球要能拖，所以不是按钮；但键盘照样能选中，回车空格开关面板
+    const ball = Object.assign(el('div', 'st-voice'), { id: 'st_voice_ball', tabIndex: 0, title: '酒馆语音' });
+    ball.setAttribute('role', 'button');
     ball.append(icon('fa-headphones'));
-    const panel = el('div', 'st-voice');
-    panel.id = 'st_voice_panel';
-    panel.hidden = true;
+    const panel = Object.assign(el('div', 'st-voice'), { id: 'st_voice_panel', hidden: true });
 
-    const seg = el('div', 'sv-seg');
-    const segItems = [['read', '朗读'], ['cast', '角色配音']].map(([value, label]) => {
-        const item = el('div', '', label);
-        item.addEventListener('click', () => { onMode(value); paintSeg(); });
-        seg.append(item);
-        return [value, item];
-    });
+    const seg = segmented([['read', '朗读'], ['cast', '角色配音']], (value) => { onMode(value); paintSeg(); });
     const paintSeg = () => {
-        segItems.forEach(([value, item]) => item.classList.toggle('active', settings().mode === value));
+        seg.set(settings().mode);
         analyzeButton.hidden = settings().mode !== 'cast';
     };
     const header = el('div', 'sv-panel-header');
-    header.append(seg, el('div', 'sv-spacer'),
+    header.append(seg.node, el('div', 'sv-spacer'),
         button('', onSettings, { kind: 'sv-icon sv-ghost', iconName: 'fa-gear', title: '设置' }),
         button('', () => show(false), { kind: 'sv-icon sv-ghost', iconName: 'fa-xmark', title: '收起' }));
 
@@ -95,9 +88,16 @@ export function createWidget({ settings, onPlayLatest, onStop, onPause, onPrev, 
     });
     ball.addEventListener('pointerup', () => {
         if (!drag) return;
-        if (drag.moved) localStorage.setItem(STORE, JSON.stringify({ x: at().left, y: at().top }));
+        if (drag.moved) {
+            try { localStorage.setItem(STORE, JSON.stringify({ x: at().left, y: at().top })); } catch { /* 浏览器不允许保存位置 */ }
+        }
         else show(panel.hidden);
         drag = null;
+    });
+    ball.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        show(panel.hidden);
     });
 
     // 只给了 state（暂停、继续）时沿用上一句的信息；回到 idle 就清空
@@ -105,6 +105,7 @@ export function createWidget({ settings, onPlayLatest, onStop, onPause, onPrev, 
     function setState(next = {}) {
         last = !next.state || next.state === 'idle' ? {} : { ...last, ...next };
         const { state = 'idle', speaker = '', text = '', index = 0, total = 0 } = last;
+        const going = ['playing', 'loading', 'paused'].includes(state);
         ball.classList.toggle('playing', state === 'playing');
         ball.classList.toggle('loading', state === 'loading' || state === 'analyzing');
         now.replaceChildren();
@@ -114,9 +115,10 @@ export function createWidget({ settings, onPlayLatest, onStop, onPause, onPrev, 
         fill.style.width = total ? `${((index + 1) / total) * 100}%` : '0';
         playButton.hidden = state !== 'idle';
         stopButton.hidden = state === 'idle';
-        pauseButton.hidden = !['playing', 'loading', 'paused'].includes(state);
-        prevButton.hidden = nextButton.hidden = !['playing', 'loading', 'paused'].includes(state);
+        pauseButton.hidden = prevButton.hidden = nextButton.hidden = !going;
         pauseButton.replaceChildren(icon(state === 'paused' ? 'fa-play' : 'fa-pause'), el('span', '', state === 'paused' ? '继续' : '暂停'));
+        // 按钮多了少了面板会变高变矮，开着的话重新摆一下，别盖住悬浮球
+        if (!panel.hidden) placePanel();
     }
     function refresh() {
         const on = settings().enabled && settings().widget;

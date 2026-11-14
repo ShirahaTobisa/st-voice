@@ -1,9 +1,16 @@
 // 把几段音频拼成一个 wav：用浏览器解码（顺便统一成同一个采样率），句子之间留一点空，16 位 PCM
-export async function mergeToWav(blobs, gap = 0.2) {
+import { checkAbort } from './request.js';
+
+export async function mergeToWav(blobs, gap = 0.2, signal) {
     const context = new (window.AudioContext || window.webkitAudioContext)();
     try {
         const buffers = [];
-        for (const blob of blobs) buffers.push(await context.decodeAudioData(await blob.arrayBuffer()));
+        for (const [i, blob] of blobs.entries()) {
+            checkAbort(signal);
+            try { buffers.push(await context.decodeAudioData(await blob.arrayBuffer())); }
+            catch (error) { throw Object.assign(error, { audioIndex: i }); }
+        }
+        checkAbort(signal);
         const rate = context.sampleRate;
         const channels = Math.max(1, ...buffers.map((buffer) => buffer.numberOfChannels));
         const gapFrames = Math.round(gap * rate);

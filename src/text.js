@@ -11,84 +11,84 @@ export const hash = (text) => {
     return (h >>> 0).toString(16);
 };
 
-// 「好感」「TIME」这种几个字的标签，或「好感 80」「TIME 09:00」这种短的带数字的，没有句子标点、也不是「他说：」这种引出对白的，当状态栏
-const looksLikeStatus = (text) => (text.length <= 4 || (text.length <= 40 && /[0-9]/.test(text))) && !/[。！？!?…，,]/.test(text) && !/[:：]$/.test(text);
+// 只跳过有明确标签的状态行，普通短句和叙述里的数字仍保留。
+const looksLikeStatus = text => text.length <= 80 && !/[。！？!?，,；;]|\.(?:\s|$)/.test(text)
+    && /^(?:好感(?:度)?|信任(?:度)?|体力|精力|生命(?:值)?|魔力|HP|MP|TIME|时间|日期|位置|地点|等级|金钱|余额)\s*(?:[:：=]\s*\S|[-+]?\d)/i.test(text);
 
 export function extractLines(root, maxLength = 160) {
-    const pieces = [];
-    const addText = (node, kind) => {
-        const text = node.data;
-        const push = (start, end, k) => text.slice(start, end).trim() && pieces.push({ node, start, end, kind: k });
-        const sentences = (start, end, k) => {
-            let from = start;
-            for (const m of text.slice(start, end).matchAll(SENTENCE_RE)) {
-                const to = start + m.index + m[0].length;
-                push(from, to, k);
-                from = to;
-            }
-            push(from, end, k);
-        };
-        let pos = 0;
-        for (const m of kind ? [] : text.matchAll(MARK_RE)) {
-            sentences(pos, m.index, 'text');
-            push(m.index, m.index + m[0].length, /^[（(]/.test(m[0]) ? 'paren' : 'quote');
-            pos = m.index + m[0].length;
-        }
-        sentences(pos, text.length, kind || 'text');
-    };
+    maxLength = Math.max(2, maxLength);
+    const runs = [];
+    let run = null;
+    const boundary = () => { run = null; };
     const visit = (node, kind) => {
-        if (node.nodeType === Node.TEXT_NODE) return addText(node, kind);
+        if (node.nodeType === Node.TEXT_NODE) {
+            if (!node.data) return;
+            if (!run) { run = { nodes: [], text: '' }; runs.push(run); }
+            run.nodes.push({ node, kind, offset: run.text.length });
+            run.text += node.data;
+            return;
+        }
         if (node.nodeType !== Node.ELEMENT_NODE || SKIP_TAGS.has(node.tagName)) return;
-        if (node.tagName === 'IFRAME') return visitFrame(node);
         const style = node.ownerDocument.defaultView.getComputedStyle(node);
         if (style.display === 'none' || style.visibility === 'hidden') return;
+        if (node.tagName === 'IFRAME') {
+            boundary();
+            let body;
+            try { body = node.contentDocument?.body; } catch { return; }
+            if (body) visit(body, '');
+            boundary(); return;
+        }
         const block = node.tagName === 'BR' || !style.display.startsWith('inline');
-        if (block) pieces.push(null);
+        if (block) boundary();
         for (const child of node.childNodes) visit(child, kind || INLINE_KIND[node.tagName] || '');
-        if (block) pieces.push(null);
-    };
-    // 前端卡把正文画在同源 iframe 里，能拿到的就一起读
-    const visitFrame = (frame) => {
-        let body = null;
-        try { body = frame.contentDocument?.body; } catch { return; }
-        if (body) visit(body, '');
+        if (block) boundary();
     };
     visit(root, '');
-
-    // 相邻、同类、不太长的片段并成一句；null 是换行，换行处必断
-    const lines = [];
-    let current = null;
-    for (const piece of pieces) {
-        const length = piece ? piece.end - piece.start : 0;
-        if (piece && current && current.kind === piece.kind && current.length + length <= maxLength) {
-            current.pieces.push(piece);
-            current.length += length;
-        } else {
-            current = piece && { kind: piece.kind, pieces: [piece], length };
-            if (current) lines.push(current);
-        }
-    }
-    const result = lines.map(({ kind, pieces: parts }) => {
-        const range = parts[0].node.ownerDocument.createRange();
-        range.setStart(parts[0].node, parts[0].start);
-        range.setEnd(parts.at(-1).node, parts.at(-1).end);
-        const text = parts.map((p) => p.node.data.slice(p.start, p.end)).join('').replace(/\s+/g, ' ').trim();
-        return { kind: kind === 'text' && looksLikeStatus(text) ? 'status' : kind, range, text, parts };
-    });
-    // 状态栏是一整块：挨着状态行的短行（「位置」「罗德岛食堂」），或夹在两条状态行中间的任何一行，也算状态；反复扫到没有变化为止
-    const shortLabel = (text) => text.length <= 12 && !/[。！？!?…，,]/.test(text);
-    const isStatus = (line) => line?.kind === 'status';
-    for (let changed = true, pass = 0; changed && pass < 8; pass += 1) {
-        changed = false;
-        result.forEach((line, i) => {
-            if (line.kind !== 'text') return;
-            const before = isStatus(result[i - 1]);
-            const after = isStatus(result[i + 1]);
-            if ((before && after) || ((before || after) && shortLabel(line.text))) {
-                line.kind = 'status';
-                changed = true;
+    const result = [];
+    for (const { text, nodes } of runs) {
+        const slices = [];
+        const push = (start, end, type) => {
+            while (start < end) {
+                let to = Math.min(end, start + maxLength);
+                if (to < end && /[\uD800-\uDBFF]/.test(text[to - 1])) to -= 1;
+                if (text.slice(start, to).trim()) {
+                    const last = slices.at(-1);
+                    if (last && last.kind === type && to - last.start <= maxLength) last.end = to;
+                    else slices.push({ start, end: to, kind: type });
+                }
+                start = to;
             }
-        });
+        };
+        const sentences = (start, end, type) => {
+            let from = start;
+            for (const match of text.slice(start, end).matchAll(SENTENCE_RE)) {
+                const to = start + match.index + match[0].length;
+                push(from, to, type); from = to;
+            }
+            push(from, end, type);
+        };
+        const plain = (start, end) => {
+            for (const { node, kind, offset } of nodes) {
+                const a = Math.max(start, offset), b = Math.min(end, offset + node.data.length);
+                if (a < b) sentences(a, b, kind || 'text');
+            }
+        };
+        let from = 0;
+        for (const match of text.matchAll(MARK_RE)) {
+            plain(from, match.index);
+            sentences(match.index, match.index + match[0].length, /^[（(]/.test(match[0]) ? 'paren' : 'quote');
+            from = match.index + match[0].length;
+        }
+        plain(from, text.length);
+        for (const slice of slices) {
+            const parts = nodes.filter(p => p.offset < slice.end && p.offset + p.node.data.length > slice.start)
+                .map(p => ({ node: p.node, start: Math.max(0, slice.start - p.offset), end: Math.min(p.node.data.length, slice.end - p.offset) }));
+            const range = parts[0].node.ownerDocument.createRange();
+            range.setStart(parts[0].node, parts[0].start);
+            range.setEnd(parts.at(-1).node, parts.at(-1).end);
+            const spoken = text.slice(slice.start, slice.end).replace(/\s+/g, ' ').trim();
+            result.push({ kind: slice.kind === 'text' && looksLikeStatus(spoken) ? 'status' : slice.kind, range, text: spoken, parts });
+        }
     }
     return result;
 }
@@ -120,7 +120,10 @@ const windowOf = (range) => {
 };
 const clearAll = (name) => {
     for (const win of windows) {
-        try { win.CSS.highlights.delete(name); } catch { windows.delete(win); /* iframe 已经没了 */ }
+        try {
+            win.CSS.highlights.delete(name);
+            if (win !== window && !win.frameElement?.isConnected) windows.delete(win);
+        } catch { windows.delete(win); /* iframe 已经没了 */ }
     }
 };
 export function highlight(range) {

@@ -19,8 +19,11 @@ export async function uploadFile(name, blob) {
     return String((await response.json()).path).replace(/^\/+/, '');
 }
 
-export const deleteFile = (path) => fetch('/api/files/delete', {
-    method: 'POST',
-    headers: context().getRequestHeaders(),
-    body: JSON.stringify({ path }),
-}).catch(() => {});
+export const deleteFile = async (path) => {
+    const response = await fetch('/api/files/delete', {
+        method: 'POST',
+        headers: context().getRequestHeaders(),
+        body: JSON.stringify({ path }),
+    });
+    if (!response.ok && response.status !== 404) throw new Error(`删除参考音频失败：${response.status}`);
+};

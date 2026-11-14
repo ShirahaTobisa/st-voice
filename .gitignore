@@ -18,6 +18,7 @@ Desktop.ini
 *.tmp
 *.log
 .cache/
+/docs/FRONTEND-CONTRACT.md
 
 # Common generated dependencies and build output
 node_modules/

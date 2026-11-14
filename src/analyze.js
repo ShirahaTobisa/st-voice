@@ -1,5 +1,6 @@
 // 角色配音：让模型判断每句是谁说的、什么语气；声音是别的语言的人物，顺便把台词翻译过去
 import { log } from './log.js';
+import { abortable, checkAbort } from './request.js';
 
 export const NARRATOR = '旁白';
 export const KIND_LABEL = { quote: '对白', action: '动作', paren: '括号', text: '叙述', status: '状态' };
@@ -22,7 +23,7 @@ const SYSTEM = `你是一部有声剧的配音导演。下面是一段角色扮�
 9. 「${NARRATOR}」的语气固定写 calm narration。
 
 翻译：
-10. 「需要翻译的说话人」里列出的人，配音的声音是另一种语言。这些人的每一句都要在第 4 个位置给出对应语言的译文：自然口语、保留语气和称呼、不加解释、不加引号；这句本来就是那种语言就留空。没列出的人第 4 个位置留空。
+10. 按下面的声音语言填写第 4 个位置的译文：自然口语、保留语气和称呼、不加解释、不加引号；这句本来就是那种语言就留空。「跟正文一样」不翻译；没有单独列出的说话人使用默认语言。
 
 输出：
 只输出一个 JSON 数组，不要解释、不要 Markdown 代码块。每个元素是 [行号, "说话人", "语气", "译文"]，行号从 1 开始，正文有几行就要有几个元素，不能漏也不能重复。
@@ -31,7 +32,8 @@ const SYSTEM = `你是一部有声剧的配音导演。下面是一段角色扮�
 const buildPrompt = (lines, { names, user, profile, targets = {} }) => {
     const head = [`已知人物：${names.join('、') || '（正文里出现谁就用谁的名字）'}`, `用户扮演：${user}`];
     const pairs = Object.entries(targets);
-    head.push(pairs.length ? `需要翻译的说话人：${pairs.map(([name, language]) => `${name} → ${language}`).join('，')}` : '需要翻译的说话人：（没有，第 4 个位置都留空）');
+    head.push(pairs.length ? `声音语言：${pairs.map(([name, language]) => `${name} → ${language || '跟正文一样'}`).join('，')}` : '声音语言：跟正文一样');
+    head.push(`未单独列出的说话人：${targets[NARRATOR] || '跟正文一样'}`);
     if (profile) head.push(`角色设定摘录：${profile}`);
     return `${head.join('\n')}\n\n正文：\n${lines.map((line, i) => `${i + 1}. [${KIND_LABEL[line.kind]}] ${line.text}`).join('\n')}`;
 };
@@ -43,19 +45,27 @@ export function parseLabels(text, count) {
     try {
         rows = JSON.parse(text.slice(text.indexOf('['), text.lastIndexOf(']') + 1));
     } catch {
-        rows = [...text.matchAll(/\[\s*(\d+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"(?:\s*,\s*"([^"]*)")?\s*\]/g)].map((m) => [m[1], m[2], m[3], m[4] || '']);
+        rows = [...text.matchAll(/\[\s*\d+\s*,\s*"(?:\\.|[^"\\])*"\s*,\s*"(?:\\.|[^"\\])*"(?:\s*,\s*"(?:\\.|[^"\\])*")?\s*\]/g)].map(m => JSON.parse(m[0]));
     }
+    const seen = new Set();
+    if (!Array.isArray(rows)) throw new Error('模型没有返回配音表，请重新分析');
     for (const row of rows) {
         if (!Array.isArray(row)) continue;
         const [index, speaker, tone, translation] = row;
         const i = Number(index) - 1;
-        if (labels[i]) labels[i] = [String(speaker ?? '').trim() || NARRATOR, String(tone ?? '').trim(), String(translation ?? '').trim()];
+        if (!Number.isInteger(i) || i < 0 || i >= count || typeof speaker !== 'string' || typeof tone !== 'string'
+            || (translation != null && typeof translation !== 'string')) throw new Error('配音表行号或内容无效，请重新分析');
+        if (seen.has(i)) throw new Error('配音表有重复行号，请重新分析');
+        seen.add(i);
+        labels[i] = [speaker.trim() || NARRATOR, tone.trim(), translation?.trim() || ''];
     }
+    if (seen.size !== count) throw new Error(`配音表不完整（${seen.size} / ${count} 行），请重新分析`);
     return labels;
 }
 
 // llm.source：current 走酒馆当前连接的模型；profile 用酒馆的某个连接配置；custom 让酒馆后端转发到填的接口（和酒馆自己的「反向代理」一个路子，不用浏览器直连）
-export async function requestLabels(lines, info, llm) {
+export async function requestLabels(lines, info, llm, signal) {
+    checkAbort(signal);
     const context = SillyTavern.getContext();
     const prompt = buildPrompt(lines, info);
     log('分析', `发给模型 ${lines.length} 行（${{ custom: llm.model, profile: '连接配置' }[llm.source] || '酒馆当前连接'}）`, `[system]\n${SYSTEM}\n\n[user]\n${prompt}`);
@@ -71,18 +81,19 @@ export async function requestLabels(lines, info, llm) {
             chat_completion_source: 'openai',
             reverse_proxy: llm.url,
             proxy_password: llm.key,
-        }, {}, true);
+        }, {}, true, signal);
         text = result?.content || '';
         reasoning = result?.reasoning || '';
     } else if (llm.source === 'profile') {
         if (!llm.profile) throw new Error('先在设置里选一个连接配置');
         // 不传 max_tokens，由那个配置的预设和接口自己定
-        const result = await context.ConnectionManagerRequestService.sendRequest(llm.profile, [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt }], undefined, { stream: false });
+        const result = await context.ConnectionManagerRequestService.sendRequest(llm.profile, [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt }], undefined, { stream: false, signal });
         text = result?.content || '';
         reasoning = result?.reasoning || '';
     } else {
-        text = await context.generateRaw({ systemPrompt: SYSTEM, prompt });
+        text = await abortable(context.generateRaw({ systemPrompt: SYSTEM, prompt }), signal);
     }
+    checkAbort(signal);
     log('分析', text ? '模型回复' : '模型没有返回正文', text || (reasoning ? `[只有思考过程]\n${reasoning}` : ''));
     if (!text) throw new Error(reasoning ? '模型只返回了思考过程，没给出结果：换个不思考的模型，或者到接口那边把输出上限调大' : '模型没有返回内容');
     const labels = parseLabels(text, lines.length);

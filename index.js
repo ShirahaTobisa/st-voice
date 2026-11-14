@@ -9,8 +9,13 @@ import google from './src/providers/google.js';
 import edge from './src/providers/edge.js';
 import { extractLines, highlight, clearHighlight, highlightProgress, revealRange, setMarks, hash } from './src/text.js';
 import { mergeToWav } from './src/audio.js';
+import { createMessageObserver } from './src/message-observer.js';
+import { captureSynthesis, voiceKey, audioKey } from './src/synthesis.js';
+import { deleteAudio } from './src/cache.js';
+import { abortable, checkAbort } from './src/request.js';
 import { createPlayer } from './src/player.js';
 import { NARRATOR, KIND_LABEL, langName, requestLabels } from './src/analyze.js';
+import { linesKey, createAnalysis, readAnalysis } from './src/analysis-cache.js';
 import { openSettings } from './src/settings.js';
 import { createWidget } from './src/widget.js';
 import { el, button, input, openWindow } from './src/ui.js';
@@ -30,7 +35,6 @@ const BUTTONS = '<div title="播放语音" class="mes_button st_voice_play fa-so
 
 const context = () => SillyTavern.getContext();
 const settings = () => context().extensionSettings[MODULE];
-const provider = () => PROVIDERS[settings().provider];
 const cardKey = () => { const ctx = context(); return ctx.groupId ? `group:${ctx.groupId}` : ctx.characters[ctx.characterId]?.avatar || ''; };
 const cardName = () => { const ctx = context(); return ctx.groupId ? ctx.groups.find((g) => g.id === ctx.groupId)?.name || '群聊' : ctx.characters[ctx.characterId]?.name || ''; };
 const cast = () => settings().cast[cardKey()] || [];
@@ -38,11 +42,12 @@ const cast = () => settings().cast[cardKey()] || [];
 // 带 provider 标记，别的提供商下选的声音当没选（老数据没标记的都是 Fish 的）
 const hasVoice = (voice) => !!(voice && (voice.id || voice.ref) && (voice.provider || 'fish') === settings().provider);
 const voiceFor = (name) => [cast().find((p) => p.name === name), cast().find((p) => p.name === NARRATOR), settings().narrator].find(hasVoice) || {};
-const voiceKey = (voice) => voice.id || voice.ref?.path || '';
 const messageText = (id) => document.querySelector(`#chat .mes[mesid="${id}"] .mes_text`);
 const mesid = (element) => Number($(element).closest('.mes').attr('mesid'));
 const lastReply = () => context().chat.findLastIndex((message) => !message.is_user && !message.is_system);
 const fail = (message) => { toastr.error(message, '语音'); log('错误', message); };
+const cancelled = () => new DOMException('任务已停止或聊天已变更', 'AbortError');
+const reportError = error => { if (error.name !== 'AbortError') fail(error.message); };
 // 角色设定的前几百字，帮模型认人名
 const cardProfile = () => {
     try {
@@ -55,10 +60,32 @@ let items = [];
 let playingId = null;
 let token = 0;
 let lastAuto = '';
+let pendingAuto = null;
 let widget;
+let exportController = null;
+const analyses = new Map();
+const unsavedAnalyses = new WeakMap();
+
+function messageScope(messageId) {
+    const ctx = context(), message = ctx.chat[messageId], key = cardKey();
+    const text = message?.mes;
+    return { ctx, message, key, check() {
+        const now = context();
+        if (!settings().enabled || now.chatId !== ctx.chatId || cardKey() !== key || now.chat[messageId] !== message || message?.mes !== text) throw cancelled();
+    } };
+}
+
+async function saveAnalysis(scope) {
+    scope.check();
+    const saved = scope.message.extra.st_voice;
+    unsavedAnalyses.set(scope.message, saved);
+    await scope.ctx.saveChat();
+    if (unsavedAnalyses.get(scope.message) === saved) unsavedAnalyses.delete(scope.message);
+    scope.check();
+}
 
 const player = createPlayer({
-    synthesize: (item, signal) => provider().synthesize(item, settings()[settings().provider], signal),
+    synthesize: (item, signal) => PROVIDERS[item.synthesis.provider].synthesize(item, item.synthesis.settings, signal),
     onLine: (i) => {
         highlight(items[i].range);
         if (settings().follow) revealRange(items[i].range);
@@ -86,8 +113,15 @@ function finish() {
     widget.setState();
     refreshButtons();
 }
-function stop() {
+function stop(cancelAnalysis = true) {
     token += 1;
+    pendingAuto = null;
+    closePopover();
+    exportController?.abort();
+    if (cancelAnalysis) {
+        for (const task of analyses.values()) task.controller.abort();
+        analyses.clear();
+    }
     player.stop();
     finish();
 }
@@ -103,51 +137,70 @@ function castNames() {
     return [...new Set([...members, ...cast().map((p) => p.name)].filter((name) => name && name !== NARRATOR))];
 }
 
-const linesKey = (lines) => hash(lines.map((line) => line.text).join('\n'));
 // 谁的声音是别的语言：分析时让模型顺便把这些人的台词翻译过去。换了语言，存过的分析就作废
 function targetsOf() {
     const ctx = context();
     const targets = {};
     const add = (name, voice) => { if (voice?.lang) targets[name] = langName(voice.lang); };
-    for (const person of cast()) if (person.name !== NARRATOR) add(person.name, person);
     add(NARRATOR, voiceFor(NARRATOR));
+    for (const person of cast()) if (person.name !== NARRATOR && hasVoice(person)) {
+        if (person.lang || targets[NARRATOR]) targets[person.name] = langName(person.lang);
+    }
     if (settings().userLines) add(ctx.name1, voiceFor(ctx.name1));
     return targets;
 }
-const savedLabels = (message, lines) => {
-    const saved = message.extra?.st_voice;
-    return saved?.hash === linesKey(lines) && JSON.stringify(saved.targets || {}) === JSON.stringify(targetsOf()) ? saved.labels : null;
-};
+const savedLabels = (message, lines) => readAnalysis(message.extra?.st_voice, lines, targetsOf());
 
 // 分析这条消息谁说的、什么语气；结果存在消息里，文字没变就不再问模型；新人物自动进配音表
 async function analyze(messageId, lines, force = false) {
-    const ctx = context();
-    const message = ctx.chat[messageId];
+    const scope = messageScope(messageId);
+    const { ctx, message, key } = scope;
+    scope.check();
     const saved = savedLabels(message, lines);
-    if (!force && saved) return saved;
+    if (!force && saved) {
+        if (unsavedAnalyses.has(message)) { await saveAnalysis(scope); refreshMarks(); }
+        return saved;
+    }
     // 状态栏、变量这类行不给模型看，直接记成旁白
     const picked = lines.map((line, i) => [line, i]).filter(([line]) => line.kind !== 'status');
     if (!picked.length) throw new Error('这条消息只有状态栏、变量，没有能分析的正文');
     const targets = targetsOf();
-    const partial = await requestLabels(picked.map(([line]) => line), { names: castNames(), user: ctx.name1, profile: cardProfile(), targets }, settings().llm);
-    const labels = lines.map(() => [NARRATOR, '', '']);
-    picked.forEach(([, i], j) => { labels[i] = partial[j]; });
-    (message.extra ??= {}).st_voice = { hash: linesKey(lines), labels, targets };
-    if (cardKey()) {
-        const people = settings().cast[cardKey()] ??= [];
-        const added = [];
-        for (const [speaker] of labels) {
-            if (speaker !== NARRATOR && speaker !== ctx.name1 && !people.some((p) => p.name === speaker)) {
-                people.push({ name: speaker, id: '', title: '' });
-                added.push(speaker);
+    const info = { names: castNames(), user: ctx.name1, profile: cardProfile(), targets };
+    const llm = structuredClone(settings().llm);
+    const signature = () => JSON.stringify([linesKey(lines), targetsOf(), settings().provider, settings().llm, castNames(), context().name1]);
+    const fingerprint = signature();
+    const previous = analyses.get(message);
+    if (!force && previous?.fingerprint === fingerprint) return previous.promise;
+    previous?.controller.abort();
+    const task = { controller: new AbortController(), fingerprint };
+    analyses.set(message, task);
+    task.promise = (async () => {
+        try {
+            const signal = task.controller.signal;
+            const partial = await abortable(requestLabels(picked.map(([line]) => line), info, llm, signal), signal);
+            checkAbort(signal); scope.check();
+            if (analyses.get(message) !== task || signature() !== fingerprint) throw cancelled();
+            const labels = lines.map(() => [NARRATOR, '', '']);
+            picked.forEach(([, i], j) => { labels[i] = partial[j]; });
+            (message.extra ??= {}).st_voice = createAnalysis(lines, labels, targets);
+            if (key) {
+                const people = settings().cast[key] ??= [];
+                const added = [];
+                for (const [speaker] of labels) {
+                    if (speaker !== NARRATOR && speaker !== ctx.name1 && !people.some(p => p.name === speaker)) {
+                        people.push({ name: speaker, id: '', title: '' }); added.push(speaker);
+                    }
+                }
+                ctx.saveSettingsDebounced(); remindMissing(added);
             }
+            await saveAnalysis(scope);
+            checkAbort(signal); scope.check(); refreshMarks();
+            return labels;
+        } finally {
+            if (analyses.get(message) === task) analyses.delete(message);
         }
-        ctx.saveSettingsDebounced();
-        remindMissing(added);
-    }
-    await ctx.saveChat();
-    refreshMarks();
-    return labels;
+    })();
+    return task.promise;
 }
 
 // 这次分析新冒出来的人物还没有声音：提醒一次，点提示直接打开配音表、展开那个人的选声音（Fish 落在克隆页，名字预填好）
@@ -164,9 +217,9 @@ function remindMissing(names) {
 // 按设置挑出要读的句子，配上声音和语气；index 是句子在正文里的序号，点句播放用
 function itemsOf(message, lines, labels) {
     const s = settings();
-    const key = `${s.provider}|${s[s.provider].model || ''}`;
+    const synthesis = captureSynthesis(s);
     const keep = (line) => (line.kind !== 'status' || (line.speaker && line.speaker !== NARRATOR)) && !(s.skipParen && line.kind === 'paren') && !(s.skipAction && line.kind === 'action');
-    const withVoice = (line, voice) => ({ ...line, key, voice, voiceKey: voiceKey(voice), speech: pronounce(line.text) });
+    const withVoice = (line, voice) => ({ ...line, synthesis, key: synthesis.key, voice: structuredClone(voice), voiceKey: voiceKey(voice), speech: pronounce(line.text) });
     const indexed = lines.map((line, index) => ({ ...line, index }));
     if (!labels) {
         const voice = voiceFor(message.name);
@@ -181,8 +234,9 @@ function itemsOf(message, lines, labels) {
 
 // from：从第几句开始；only：只播这一句
 async function play(messageId, { from = 0, only = false } = {}) {
+    if (!settings().enabled) return;
     if (playingId === messageId && !from && !only) return stop();
-    stop();
+    stop(false);
     const mine = token;
     const s = settings();
     const message = context().chat[messageId];
@@ -199,59 +253,78 @@ async function play(messageId, { from = 0, only = false } = {}) {
             labels = await analyze(messageId, lines);
             if (mine !== token) return;
         }
-        items = itemsOf(message, lines, labels).filter((item) => (only ? item.index === from : item.index >= from));
+        items = itemsOf(message, lines, labels).filter(item => item.speech.trim() && (only ? item.index === from : item.index >= from));
         if (!items.length) {
             stop();
             return toastr.warning(labels ? '这条消息里没有人物台词' : '按现在的设置没有能读的内容', '语音');
         }
         refreshMarks();
-        await player.play(items, { rate: s.speed, volume: s.volume, cacheLimit: s.cacheLimit * 1048576, album: cardName() });
+        const outcome = await player.play(items, { rate: s.speed, volume: s.volume, cacheLimit: s.cacheLimit * 1048576, album: cardName() });
         // 自己放完的（不是被停的）且开了连播：接着读后面的回复
-        if (mine === token && s.continuous && !only) {
+        if (outcome === 'completed' && mine === token && s.continuous && !only) {
             const after = context().chat.findIndex((m, i) => i > messageId && !m.is_user && !m.is_system);
             if (after >= 0) return play(after);
         }
     } catch (error) {
-        stop();
-        fail(error.message);
+        if (mine === token) { stop(); reportError(error); }
     }
 }
 
 // 把这条消息要读的句子全部合成（有缓存的用缓存），拼成一个 wav 下载
 async function exportAudio(messageId) {
-    const message = context().chat[messageId];
+    if (!settings().enabled) return;
+    stop(false);
+    const mine = token, scope = messageScope(messageId);
+    const { message } = scope;
     const root = messageText(messageId);
     if (!message || !root) return toastr.info('没有可以导出的回复', '语音');
     const lines = extractLines(root);
     if (!lines.length) return toastr.warning('这条消息没有能读的文字', '语音');
+    const controller = new AbortController();
+    exportController = controller;
+    const check = () => { checkAbort(controller.signal); scope.check(); };
+    const name = cardName() || '语音';
+    let list = [];
     try {
         const labels = settings().mode === 'cast' ? await analyze(messageId, lines) : null;
-        const list = itemsOf(message, lines, labels);
+        check();
+        list = itemsOf(message, lines, labels).filter(item => item.speech.trim());
         if (!list.length) return toastr.warning(labels ? '这条消息里没有人物台词' : '按现在的设置没有能读的内容', '语音');
-        const blobs = await player.fetchAll(list, (i) => widget.setState({ state: 'loading', speaker: '', text: `导出中，第 ${i + 1} / ${list.length} 句`, index: i, total: list.length }));
+        const blobs = await player.fetchAll(list, i => {
+            check(); widget.setState({ state: 'loading', speaker: '', text: `导出中，第 ${i + 1} / ${list.length} 句`, index: i, total: list.length });
+        }, { signal: controller.signal, cacheLimit: settings().cacheLimit * 1048576 });
+        check();
         widget.setState({ state: 'loading', speaker: '', text: '拼接中…', index: list.length - 1, total: list.length });
-        download(await mergeToWav(blobs), `${cardName() || '语音'}-${messageId + 1}.wav`);
+        const wav = await mergeToWav(blobs, 0.2, controller.signal);
+        check(); download(wav, `${name}-${messageId + 1}.wav`);
         toastr.success(`导出好了，${list.length} 句`, '语音');
     } catch (error) {
-        fail(error.message);
+        const invalid = list[error.audioIndex];
+        if (invalid) await deleteAudio(audioKey(invalid, invalid.speech ?? invalid.text)).catch(() => {});
+        if (mine === token) reportError(error);
     } finally {
-        if (playingId == null) widget.setState();
+        if (exportController === controller) exportController = null;
+        if (mine === token && playingId == null) widget.setState();
     }
 }
 
-// ---- 点句播放：最新回复和正在播的那条，能读的句子画虚线；点一下弹小卡片，播这句或从这句开始 ----
+// ---- 点句播放：朗读标记最新/正在播的回复，配音恢复所有已分析回复；点句可播一句或从这里开始 ----
 const marks = new Map(); // 消息号 → [{ index, range, text, speaker, tone, kind }]
 let popover = null;
-let markTimers = [];
+let markObserver;
 
 function refreshMarks() {
     const ctx = context();
+    const roots = [];
     marks.clear();
     if (settings().enabled) {
-        for (const messageId of new Set([lastReply(), playingId].filter((id) => id != null && id >= 0))) {
+        const selected = new Set([lastReply(), playingId].filter(id => id != null && id >= 0));
+        if (settings().mode === 'cast') ctx.chat.forEach((message, id) => { if (message.extra?.st_voice) selected.add(id); });
+        for (const messageId of selected) {
             const message = ctx.chat[messageId];
             const root = messageText(messageId);
             if (!message || !root) continue;
+            roots.push(root);
             const lines = extractLines(root);
             const labels = settings().mode === 'cast' ? savedLabels(message, lines) : null;
             if (settings().mode === 'cast' && !labels) continue;
@@ -260,22 +333,31 @@ function refreshMarks() {
         }
     }
     setMarks([...marks.values()].flat().map((mark) => mark.range));
+    markObserver?.watch(roots);
+    if (pendingAuto) {
+        const { messageId, message } = pendingAuto;
+        const root = messageText(messageId);
+        if (ctx.chat[messageId] !== message) pendingAuto = null;
+        else if (root && extractLines(root).length) { pendingAuto = null; onRendered(messageId); }
+    }
 }
-// 前端卡的正文在 iframe 里，渲染比消息晚，所以多扫几次
-function scheduleMarks() {
-    markTimers.forEach(clearTimeout);
-    markTimers = [400, 2000, 5000].map((ms) => setTimeout(refreshMarks, ms));
-}
-function watchFrames(root) {
+const scheduleMarks = () => markObserver.schedule();
+function watchFrames(root, mes = root.closest('.mes')) {
     for (const frame of root.querySelectorAll('iframe')) {
         let doc = null;
         try { doc = frame.contentDocument; } catch { continue; }
-        if (!doc || doc.__stVoiceClick) continue;
-        doc.__stVoiceClick = true;
-        doc.addEventListener('click', (event) => {
-            const rect = frame.getBoundingClientRect();
-            onTextClick(event, frame.closest('.mes'), rect.left, rect.top);
-        });
+        if (!doc) continue;
+        if (!doc.__stVoiceClick) {
+            doc.__stVoiceClick = true;
+            doc.addEventListener('click', (event) => {
+                let x = 0, y = 0;
+                for (let owner = frame; owner; owner = owner.ownerDocument.defaultView.frameElement) {
+                    const rect = owner.getBoundingClientRect(); x += rect.left; y += rect.top;
+                }
+                onTextClick(event, mes, x, y);
+            });
+        }
+        if (doc.body) watchFrames(doc.body, mes);
     }
 }
 // 点到句子的字上才弹（看点的位置在不在这句占的那几块里）；选文字、点别处不打扰
@@ -312,9 +394,11 @@ function openPopover(messageId, mark, x, y) {
 }
 
 // 预览：看哪些句子会被读；角色配音模式还能改说话人和语气，改完播放
-async function preview(messageId) {
-    const ctx = context();
-    const message = ctx.chat[messageId];
+async function preview(messageId, force = false) {
+    if (!settings().enabled) return;
+    const mine = token;
+    const scope = messageScope(messageId);
+    const { ctx, message } = scope;
     const root = messageText(messageId);
     if (!message || !root) return toastr.info('没有可以预览的回复', '语音');
     const lines = extractLines(root);
@@ -324,11 +408,12 @@ async function preview(messageId) {
     if (isCast) {
         try {
             widget.setState({ state: 'analyzing' });
-            labels = await analyze(messageId, lines);
+            labels = await analyze(messageId, lines, force);
+            scope.check();
         } catch (error) {
-            return fail(error.message);
+            return reportError(error);
         } finally {
-            if (playingId == null) widget.setState();
+            if (mine === token && playingId == null) widget.setState();
         }
     }
     const voiced = new Set(itemsOf(message, lines, labels).map((item) => item.range));
@@ -357,19 +442,18 @@ async function preview(messageId) {
     const win = openWindow({ title: '语音预览', iconName: 'fa-list-check', small: true, footer });
     win.content.append(names, el('div', 'sv-hint', `${isCast ? '可以改说话人和语气，改完点播放。灰的是不会念的句子。' : '灰的是按当前设置不会读的句子。'}${hidden ? ` 另有 ${hidden} 行状态栏、变量之类的已自动跳过。` : ''}`), ...rows.filter(Boolean));
     const result = await win.closed;
-    if (result === 'again') {
-        delete message.extra.st_voice;
-        return preview(messageId);
-    }
+    try { scope.check(); } catch { return; }
+    if (result === 'again') return preview(messageId, true);
     const from = result === 'play' ? 0 : result?.from;
     if (from == null && result !== 'export') return;
     if (isCast) {
-        message.extra.st_voice.labels = rows.map((node, i) => {
+        const edited = rows.map((node, i) => {
             if (!node) return labels[i];
             const [speaker, tone] = node.querySelectorAll('input');
             return [speaker.value.trim() || NARRATOR, tone.value.trim(), labels[i][2] || ''];
         });
-        await ctx.saveChat();
+        message.extra.st_voice = createAnalysis(lines, edited, message.extra.st_voice.targets);
+        try { await saveAnalysis(scope); } catch (error) { return reportError(error); }
         refreshMarks();
     }
     if (result === 'export') return exportAudio(messageId);
@@ -378,6 +462,8 @@ async function preview(messageId) {
 
 // 面板上的「分析」：重新分析最新回复，分析完打开预览
 async function analyzeLatest() {
+    if (!settings().enabled) return;
+    const mine = token;
     const messageId = lastReply();
     const root = messageText(messageId);
     if (!root) return toastr.info('没有可以分析的回复', '语音');
@@ -385,11 +471,11 @@ async function analyzeLatest() {
         widget.setState({ state: 'analyzing' });
         await analyze(messageId, extractLines(root), true);
     } catch (error) {
-        return fail(error.message);
+        return reportError(error);
     } finally {
-        if (playingId == null) widget.setState();
+        if (mine === token && playingId == null) widget.setState();
     }
-    preview(messageId);
+    if (mine === token) preview(messageId);
 }
 
 // 回复渲染完：按设置自动播放或自动分析；流式开始时的占位消息和重复触发都跳过
@@ -400,14 +486,18 @@ function onRendered(messageId) {
     const message = ctx.chat[messageId];
     const root = messageText(messageId);
     if (!s.enabled || !message || !root || message.is_user || message.is_system || !message.mes || message.mes === '...') return;
-    const key = `${ctx.chatId}:${messageId}:${hash(message.mes)}`;
+    if (!s.autoPlay && !(s.autoAnalyze && s.mode === 'cast')) return;
+    const key = JSON.stringify([cardKey(), ctx.chatId, messageId, hash(message.mes)]);
     if (key === lastAuto) return;
+    if (!extractLines(root).length) { pendingAuto = { messageId, message }; return; }
+    pendingAuto = null;
     lastAuto = key;
     if (s.autoPlay) play(messageId);
-    else if (s.autoAnalyze && s.mode === 'cast') analyze(messageId, extractLines(root)).catch((error) => fail(error.message));
+    else if (s.autoAnalyze && s.mode === 'cast') analyze(messageId, extractLines(root)).catch(reportError);
 }
 
 const applyEnabled = () => {
+    if (!settings().enabled) stop();
     document.body.classList.toggle('st-voice-off', !settings().enabled);
     widget.refresh();
     refreshMarks();
@@ -416,6 +506,7 @@ const openSettingsWindow = (focus = null) => openSettings(settings(), PROVIDERS,
     cardKey, cardName, focus,
     onChange: (key, value) => {
         if (['widget', 'enabled', 'mode', 'provider'].includes(key)) applyEnabled();
+        else scheduleMarks();
         if (key === 'volume') player.setVolume(value);
         if (key === 'speed') player.setRate(value);
     },
@@ -477,6 +568,9 @@ jQuery(async () => {
     });
     addMenuEntry();
     addSlashCommands();
+    markObserver = createMessageObserver(document.getElementById('chat'), refreshMarks);
+    addEventListener('pagehide', () => { stop(); markObserver.dispose(); });
+    addEventListener('pageshow', event => { if (event.persisted) applyEnabled(); });
     applyEnabled();
 
     $('#message_template .extraMesButtons, #chat .extraMesButtons').prepend(BUTTONS);
